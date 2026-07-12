@@ -1,0 +1,22 @@
+packages:
+  - apps/api
+  - apps/admin
+  - apps/worker
+  - packages/*
+confirmModulesPurge: false
+onlyBuiltDependencies:
+  - '@prisma/client'
+  - '@prisma/engines'
+  - argon2
+  - esbuild
+  - msgpackr-extract
+  - prisma
+  - sharp
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  argon2: true
+  esbuild: true
+  msgpackr-extract: true
+  prisma: true
+  sharp: true

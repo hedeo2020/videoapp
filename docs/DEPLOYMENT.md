@@ -1,0 +1,7 @@
+# Coolify deployment on OCI Ampere A1
+
+Use Ubuntu ARM64, keep ports 5432 and 6379 private, and expose only the API and admin services through Coolify's HTTPS proxy. Import the repository as a Docker Compose resource and combine `docker-compose.yml` with `docker-compose.production.yml`. Configure `api.example.com` for port 4000 and `admin.example.com` for port 3000. Put every secret from `.env.example` in Coolify; generate independent 32+ byte random secrets. Use private S3-compatible storage in production and do not deploy MinIO on the smallest host.
+
+Run database migrations before switching traffic. Create the first administrator with `pnpm --filter @securestream/api admin:create`; never retain bootstrap credentials in the environment. Back up PostgreSQL with `pg_dump --format=custom`, back up object storage using provider versioning/replication, and test `pg_restore` in an isolated database. Roll back by restoring the prior image tags and applying only a migration explicitly documented as reversible.
+
+A small Ampere VPS is appropriate for development and limited early use, not Netflix-scale traffic or large-scale concurrent transcoding. Keep worker concurrency at one and move storage, processing, Redis, and PostgreSQL to dedicated services as usage grows.

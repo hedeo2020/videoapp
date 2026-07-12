@@ -1,0 +1,11 @@
+node_modules
+.next
+dist
+.env
+*.log
+.idea
+.gradle
+local.properties
+apps/android/app/build
+coverage
+tmp
