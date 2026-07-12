@@ -4,6 +4,8 @@ Use Ubuntu ARM64, keep ports 5432 and 6379 private, and expose only the API and 
 
 If Coolify is configured as a single Dockerfile resource, the root `Dockerfile` builds only the API container on port 4000. That mode still requires external PostgreSQL and Redis URLs and does not run the admin console or worker. Use Docker Compose mode for the complete platform.
 
+To deploy the admin console as its own Coolify Dockerfile resource, keep the base directory as `/`, set the Dockerfile location to `apps/admin/Dockerfile`, expose port `3000`, and set `NEXT_PUBLIC_API_URL` to the public API URL ending in `/api/v1`. Because Next.js embeds public variables at build time, redeploy the admin app after changing `NEXT_PUBLIC_API_URL`.
+
 Run database migrations before switching traffic. Create the first administrator with `pnpm --filter @securestream/api admin:create`; never retain bootstrap credentials in the environment. Back up PostgreSQL with `pg_dump --format=custom`, back up object storage using provider versioning/replication, and test `pg_restore` in an isolated database. Roll back by restoring the prior image tags and applying only a migration explicitly documented as reversible.
 
 A small Ampere VPS is appropriate for development and limited early use, not Netflix-scale traffic or large-scale concurrent transcoding. Keep worker concurrency at one and move storage, processing, Redis, and PostgreSQL to dedicated services as usage grows.
