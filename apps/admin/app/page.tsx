@@ -80,6 +80,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [data, setData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [conversionProgress, setConversionProgress] = useState<number | null>(null);
   const [uploadPhase, setUploadPhase] = useState("");
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(null);
@@ -122,10 +123,11 @@ function Dashboard({ admin }: { admin: Admin }) {
     const form = event.currentTarget;
     setLoading(true);
     setUploadProgress(0);
+    setConversionProgress(null);
     setUploadPhase("Uploading");
     setNotice("");
     try {
-      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress, setUploadPhase);
+      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress, setUploadPhase, setConversionProgress);
       form.reset();
       setNotice(`Uploaded "${payload.title}" as a draft title.`);
       await load("Uploads");
@@ -134,6 +136,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     } finally {
       setLoading(false);
       setUploadProgress(null);
+      setConversionProgress(null);
       setUploadPhase("");
     }
   }
@@ -240,7 +243,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
-        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
@@ -265,7 +268,9 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   );
 }
 
-function UploadsPanel({ movies, uploading, uploadProgress, uploadPhase, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; uploadPhase: string; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, uploadPhase, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; conversionProgress: number | null; uploadPhase: string; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+  const converting = uploadPhase === "Converting preview";
+  const visibleProgress = converting ? conversionProgress ?? 0 : uploadProgress ?? 0;
   return (
     <section className="grid">
       <article className="panel upload">
@@ -276,7 +281,7 @@ function UploadsPanel({ movies, uploading, uploadProgress, uploadPhase, onUpload
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
           <label>Video file<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" required /></label>
           <small>Most video formats are accepted. The server creates an MP4/H.264 preview for browser playback after upload.</small>
-          {uploadProgress !== null && <div className={`uploadprogress ${uploadPhase === "Converting preview" ? "processing" : ""}`}><span style={{ width: `${uploadProgress}%` }} /><b>{uploadPhase === "Converting preview" ? "Converting preview..." : `Uploading ${uploadProgress}%`}</b></div>}
+          {uploadProgress !== null && <div className={`uploadprogress ${converting ? "processing" : ""}`}><span style={{ width: `${visibleProgress}%` }} /><b>{converting ? `Converting preview... ${visibleProgress}%` : `Uploading ${visibleProgress}%`}</b></div>}
           <button className="primary" disabled={uploading}>{uploading ? uploadPhase || "Working..." : "Upload title"}</button>
         </form>
       </article>
@@ -349,25 +354,45 @@ async function apiGet(path: string) {
   return payload;
 }
 
-function uploadWithProgress(url: string, body: FormData, headers: Record<string, string>, onProgress: (progress: number) => void, onPhase: (phase: string) => void): Promise<RecordItem> {
+function uploadWithProgress(url: string, body: FormData, headers: Record<string, string>, onProgress: (progress: number) => void, onPhase: (phase: string) => void, onConversionProgress: (progress: number | null) => void): Promise<RecordItem> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
+    const uploadId = crypto.randomUUID();
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+    const stopPolling = () => { if (pollTimer) clearInterval(pollTimer); pollTimer = null; };
+    const pollConversion = async () => {
+      try {
+        const progress = await apiGet(`/admin/uploads/${uploadId}/progress`) as { phase?: string; progress?: number };
+        if (progress.phase?.startsWith("Converting")) onPhase("Converting preview");
+        if (typeof progress.progress === "number") onConversionProgress(Math.max(0, Math.min(100, Math.round(progress.progress))));
+      } catch {
+        // Keep the upload alive even if one progress poll misses during deploy/network hiccups.
+      }
+    };
+    const startPolling = () => {
+      onConversionProgress(0);
+      void pollConversion();
+      pollTimer = setInterval(() => void pollConversion(), 1000);
+    };
     request.open("POST", url);
     request.withCredentials = true;
     Object.entries(headers).forEach(([key, value]) => request.setRequestHeader(key, value));
+    request.setRequestHeader("x-upload-id", uploadId);
     request.upload.onloadstart = () => onPhase("Uploading");
     request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
-    request.upload.onload = () => { onProgress(100); onPhase("Converting preview"); };
+    request.upload.onload = () => { onProgress(100); onPhase("Converting preview"); startPolling(); };
     request.onload = () => {
+      stopPolling();
       const payload = JSON.parse(request.responseText || "{}");
       if (request.status >= 200 && request.status < 300) {
         onProgress(100);
+        onConversionProgress(100);
         resolve(payload);
       } else {
         reject(new Error(payload.error?.message ?? "Upload failed"));
       }
     };
-    request.onerror = () => reject(new Error("Upload request could not reach the API."));
+    request.onerror = () => { stopPolling(); reject(new Error("Upload request could not reach the API.")); };
     request.send(body);
   });
 }
