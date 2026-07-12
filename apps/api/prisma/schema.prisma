@@ -37,6 +37,13 @@ enum AssetState {
   ARCHIVED
 }
 
+enum UploadStatus {
+  CREATED
+  PARTS_ISSUED
+  COMPLETED
+  ABORTED
+}
+
 model User {
   id               String            @id @default(uuid())
   email            String            @unique
@@ -44,6 +51,9 @@ model User {
   passwordHash     String
   role             Role              @default(VIEWER)
   status           UserStatus        @default(ACTIVE)
+  emailVerifiedAt  DateTime?
+  failedLoginCount Int               @default(0)
+  lockedUntil      DateTime?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   sessions         RefreshSession[]
@@ -51,6 +61,8 @@ model User {
   progress         WatchProgress[]
   history          WatchHistory[]
   myList           MyListItem[]
+  passwordResets   PasswordResetToken[]
+  emailVerifications EmailVerificationToken[]
 }
 
 model RefreshSession {
@@ -61,8 +73,37 @@ model RefreshSession {
   expiresAt    DateTime
   revokedAt    DateTime?
   replacedById String?
+  tokenFamily  String
+  userAgent    String?
+  ipHash       String?
+  lastUsedAt   DateTime  @default(now())
   createdAt    DateTime  @default(now())
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([tokenFamily])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model EmailVerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, expiresAt])
 }
@@ -74,6 +115,11 @@ model Movie {
   slug              String           @unique
   status            PublishStatus    @default(DRAFT)
   featured          Boolean          @default(false)
+  posterUrl         String?
+  backdropUrl       String?
+  trailerUrl        String?
+  genres            String[]         @default([])
+  tags              String[]         @default([])
   releaseDate       DateTime?
   maturityRating    String?
   availabilityStart DateTime?
@@ -91,6 +137,10 @@ model Series {
   synopsis        String
   slug            String           @unique
   status          PublishStatus    @default(DRAFT)
+  posterUrl       String?
+  backdropUrl     String?
+  genres          String[]         @default([])
+  tags            String[]         @default([])
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   seasons         Season[]
@@ -130,6 +180,8 @@ model VideoAsset {
   sourceStorageKey   String
   manifestStorageKey String?
   drmScheme          String?
+  drmKeyId           String?
+  licensePolicy      Json?
   failureReason      String?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
@@ -235,9 +287,10 @@ model Upload {
   videoAssetId  String
   storageKey    String
   uploadId      String?
+  parts         Json?
   bytesExpected BigInt
   bytesReceived BigInt     @default(0)
-  status        String     @default("CREATED")
+  status        UploadStatus @default(CREATED)
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   videoAsset    VideoAsset @relation(fields: [videoAssetId], references: [id])

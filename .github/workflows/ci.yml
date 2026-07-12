@@ -6,10 +6,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with: { version: 10.12.1 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @securestream/api exec prisma generate
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
@@ -17,5 +17,6 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+      - run: cp .env.example .env
       - run: docker compose config -q
       - run: docker compose build

@@ -1,0 +1,24 @@
+CREATE TYPE "UploadStatus" AS ENUM ('CREATED', 'PARTS_ISSUED', 'COMPLETED', 'ABORTED');
+
+ALTER TABLE "Movie"
+  ADD COLUMN "posterUrl" TEXT,
+  ADD COLUMN "backdropUrl" TEXT,
+  ADD COLUMN "trailerUrl" TEXT,
+  ADD COLUMN "genres" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  ADD COLUMN "tags" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+
+ALTER TABLE "Series"
+  ADD COLUMN "posterUrl" TEXT,
+  ADD COLUMN "backdropUrl" TEXT,
+  ADD COLUMN "genres" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  ADD COLUMN "tags" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
+
+ALTER TABLE "VideoAsset"
+  ADD COLUMN "drmKeyId" TEXT,
+  ADD COLUMN "licensePolicy" JSONB;
+
+ALTER TABLE "Upload"
+  ADD COLUMN "parts" JSONB,
+  ALTER COLUMN "status" DROP DEFAULT,
+  ALTER COLUMN "status" TYPE "UploadStatus" USING "status"::"UploadStatus",
+  ALTER COLUMN "status" SET DEFAULT 'CREATED';
