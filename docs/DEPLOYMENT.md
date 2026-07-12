@@ -5,3 +5,11 @@ Use Ubuntu ARM64, keep ports 5432 and 6379 private, and expose only the API and 
 Run database migrations before switching traffic. Create the first administrator with `pnpm --filter @securestream/api admin:create`; never retain bootstrap credentials in the environment. Back up PostgreSQL with `pg_dump --format=custom`, back up object storage using provider versioning/replication, and test `pg_restore` in an isolated database. Roll back by restoring the prior image tags and applying only a migration explicitly documented as reversible.
 
 A small Ampere VPS is appropriate for development and limited early use, not Netflix-scale traffic or large-scale concurrent transcoding. Keep worker concurrency at one and move storage, processing, Redis, and PostgreSQL to dedicated services as usage grows.
+
+## Launch checklist
+
+Before launch, confirm `pnpm build`, `pnpm --filter @securestream/api test`, database migrations, and Docker Compose validation all pass. Verify `/health` and `/ready` behind HTTPS, create a non-bootstrap administrator, publish one test movie with a ready asset, and complete a full viewer login, catalog, playback-session, progress, history, and logout flow.
+
+Enable PostgreSQL backups before importing real users. Use provider-side object storage versioning or replication for source media and packaged manifests. Keep Redis disposable: sessions can be reissued, queues can be replayed from upload state, and PostgreSQL remains authoritative.
+
+For production DRM, set `DRM_PROVIDER=widevine`, provide `WIDEVINE_LICENSE_URL` and `WIDEVINE_PROVIDER_API_KEY`, and ensure every protected asset has a provider key ID before publishing. The API intentionally denies playback when Widevine is selected but the asset/provider configuration is incomplete.

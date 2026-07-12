@@ -60,6 +60,9 @@ importers:
       argon2:
         specifier: ^0.43.0
         version: 0.43.1
+      bullmq:
+        specifier: ^5.56.2
+        version: 5.80.1
       fastify:
         specifier: ^5.4.0
         version: 5.10.0

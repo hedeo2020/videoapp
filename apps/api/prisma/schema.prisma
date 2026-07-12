@@ -37,6 +37,13 @@ enum AssetState {
   ARCHIVED
 }
 
+enum UploadStatus {
+  CREATED
+  PARTS_ISSUED
+  COMPLETED
+  ABORTED
+}
+
 model User {
   id               String            @id @default(uuid())
   email            String            @unique
@@ -108,6 +115,11 @@ model Movie {
   slug              String           @unique
   status            PublishStatus    @default(DRAFT)
   featured          Boolean          @default(false)
+  posterUrl         String?
+  backdropUrl       String?
+  trailerUrl        String?
+  genres            String[]         @default([])
+  tags              String[]         @default([])
   releaseDate       DateTime?
   maturityRating    String?
   availabilityStart DateTime?
@@ -125,6 +137,10 @@ model Series {
   synopsis        String
   slug            String           @unique
   status          PublishStatus    @default(DRAFT)
+  posterUrl       String?
+  backdropUrl     String?
+  genres          String[]         @default([])
+  tags            String[]         @default([])
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
   seasons         Season[]
@@ -164,6 +180,8 @@ model VideoAsset {
   sourceStorageKey   String
   manifestStorageKey String?
   drmScheme          String?
+  drmKeyId           String?
+  licensePolicy      Json?
   failureReason      String?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
@@ -269,9 +287,10 @@ model Upload {
   videoAssetId  String
   storageKey    String
   uploadId      String?
+  parts         Json?
   bytesExpected BigInt
   bytesReceived BigInt     @default(0)
-  status        String     @default("CREATED")
+  status        UploadStatus @default(CREATED)
   createdAt     DateTime   @default(now())
   updatedAt     DateTime   @updatedAt
   videoAsset    VideoAsset @relation(fields: [videoAssetId], references: [id])

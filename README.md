@@ -29,3 +29,13 @@ Architecture and milestones are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## Identity API
 
 Viewer identity includes registration, login, rotating refresh tokens with family-wide reuse revocation, logout, generic password recovery, email verification, current-user lookup, active-session listing, and individual/all-session revocation. Administrator identity uses a separate login route, short-lived HTTP-only cookies, strict same-site policy, CSRF validation for mutations, server-enforced role permissions, and audit events.
+
+## Catalog and playback API
+
+Administrators can create and update movies, series, seasons, episodes, collections, video assets, multipart uploads, and processing jobs through `/api/v1/admin/*`. Publishing a movie is blocked until at least one ready video asset exists. Viewer catalog rails only return published, available titles with ready media, and search filters out expired or unplayable results.
+
+Playback sessions enforce active account status, availability windows, ready manifests, stream limits, scoped short-lived playback tokens, server-approved watermark text, watch history, and progress sync. Production Widevine mode fails closed when a protected asset lacks provider configuration or a key ID.
+
+## Validation
+
+Run `pnpm build` before deployment and `pnpm --filter @securestream/api test` for the security/catalog rule suite. CI also validates the Docker Compose configuration and ARM64 images.
