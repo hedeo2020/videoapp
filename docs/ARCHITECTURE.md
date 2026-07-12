@@ -17,3 +17,9 @@ Production protected titles use DASH Common Encryption and an authorized Widevin
 ## API route plan
 
 All business routes are under `/api/v1`: `auth`, `account`, `catalog`, `search`, `profiles`, `my-list`, `progress`, `playback`, `admin/auth`, `admin/videos`, `admin/uploads`, `admin/catalog`, `admin/users`, `admin/settings`, and `admin/audit-logs`. `/health` and `/ready` are operational endpoints.
+
+## Identity implementation
+
+Access tokens expire quickly. Refresh values are opaque random credentials and only SHA-256 hashes are stored. Each rotation revokes the prior row and links to its replacement. Reuse of a revoked token revokes every live session in that token family and creates a high-severity security event. Five failed logins trigger progressive lock periods. Password reset revokes all sessions.
+
+Administrator endpoints independently verify role permissions on the server. Admin browser authentication uses a short-lived HTTP-only cookie plus a double-submit CSRF token for mutations. Login, logout, user-state changes, and other privileged operations are recorded with a request ID and hashed IP address.
