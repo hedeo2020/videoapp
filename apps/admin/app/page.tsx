@@ -109,6 +109,38 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
 }
 
 function Dashboard({ admin }: { admin: Admin }) {
+  const [uploadStatus, setUploadStatus] = useState("");
+  const [uploading, setUploading] = useState(false);
+
+  async function uploadMovie(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setUploading(true);
+    setUploadStatus("");
+
+    try {
+      const body = new FormData(event.currentTarget);
+      const response = await fetch(`${API}/admin/uploads/direct`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "x-csrf-token": sessionStorage.getItem("ss_csrf") ?? "" },
+        body,
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        setUploadStatus(payload.error?.message ?? "Upload failed");
+        return;
+      }
+
+      event.currentTarget.reset();
+      setUploadStatus(`Uploaded "${payload.title}" as a draft title.`);
+    } catch {
+      setUploadStatus("Upload could not reach the API. Check admin/API domains and CORS settings.");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <div className="shell">
       <aside>
@@ -163,6 +195,48 @@ function Dashboard({ admin }: { admin: Admin }) {
               <em>{trend}</em>
             </article>
           ))}
+        </section>
+        <section className="grid">
+          <article className="panel upload">
+            <div className="panelhead">
+              <div>
+                <h2>Upload title</h2>
+                <p>Create a draft movie and store the source file.</p>
+              </div>
+              <b>Draft</b>
+            </div>
+            <form onSubmit={uploadMovie}>
+              <label>
+                Title
+                <input name="title" required maxLength={160} />
+              </label>
+              <label>
+                Synopsis
+                <textarea name="synopsis" rows={4} />
+              </label>
+              <label>
+                Maturity rating
+                <input name="maturityRating" placeholder="PG-13" maxLength={20} />
+              </label>
+              <label>
+                Video file
+                <input name="file" type="file" accept="video/*,.m3u8,.mp4,.mov,.mkv" required />
+              </label>
+              {uploadStatus && <div className="formnote">{uploadStatus}</div>}
+              <button className="primary" disabled={uploading}>{uploading ? "Uploading..." : "Upload title"}</button>
+            </form>
+          </article>
+          <article className="panel health">
+            <div className="panelhead">
+              <div>
+                <h2>Upload notes</h2>
+                <p>Files are stored on the API container storage path.</p>
+              </div>
+            </div>
+            <div><span><i /> Storage</span><b>/data/media</b></div>
+            <div><span><i /> Status</span><b>Draft movie</b></div>
+            <div><span><i /> Playback</span><b>Ready asset record</b></div>
+          </article>
         </section>
         <section className="grid">
           <article className="panel activity">
