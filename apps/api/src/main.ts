@@ -34,7 +34,7 @@ const ipHash=(req:FastifyRequest)=>createHash("sha256").update(req.ip).digest("h
 const sessionContext=(req:FastifyRequest,deviceId:string)=>({deviceId,userAgent:req.headers["user-agent"],ipHash:ipHash(req)});
 const sendError=(reply:FastifyReply,requestId:string,status:number,code:string,message:string)=>reply.code(status).send({error:{code,message,requestId}});
 const slugify=(input:string)=>input.toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"").slice(0,80);
-const contentTypeFor=(key:string)=>{const lower=key.toLowerCase();return lower.endsWith(".mp4")?"video/mp4":lower.endsWith(".webm")?"video/webm":lower.endsWith(".mov")?"video/quicktime":lower.endsWith(".m3u8")?"application/vnd.apple.mpegurl":"application/octet-stream"};
+const contentTypeFor=(key:string)=>{const lower=key.toLowerCase();return lower.endsWith(".mp4")?"video/mp4":lower.endsWith(".webm")?"video/webm":lower.endsWith(".mov")?"video/quicktime":lower.endsWith(".mkv")?"video/x-matroska":lower.endsWith(".m3u8")?"application/vnd.apple.mpegurl":"application/octet-stream"};
 const storagePathFor=(key:string)=>{const root=path.resolve(storageRoot);const filePath=path.resolve(root,key);return filePath.startsWith(root+path.sep)?filePath:null};
 const adminCookieSameSite=config.NODE_ENV==="production"?"none" as const:"strict" as const;
 const storageRoot=process.env.STORAGE_LOCAL_ROOT??"/data/media";
