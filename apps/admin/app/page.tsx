@@ -78,6 +78,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string } | null>(null);
+  const [editing, setEditing] = useState<RecordItem | null>(null);
 
   const metrics = useMemo(() => [
     ["Movies", count(data.movies), "catalog"],
@@ -146,6 +147,60 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function updateMovie(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editing?.id) return;
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/movies/${editing.id}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { ...csrfHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          title: data.get("title"),
+          synopsis: data.get("synopsis"),
+          maturityRating: data.get("maturityRating") || undefined,
+          status: data.get("status"),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Update failed");
+      setEditing(null);
+      setNotice(`Updated "${payload.title}".`);
+      await load(active);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Update failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteMovie(movie: RecordItem) {
+    if (!movie.id) return;
+    const confirmed = confirm(`Delete "${String(movie.title ?? "this video")}"? This removes the catalog record and uploaded source file.`);
+    if (!confirmed) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/movies/${movie.id}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Delete failed");
+      }
+      if (editing?.id === movie.id) setEditing(null);
+      setPreview(null);
+      setNotice(`Deleted "${String(movie.title ?? "video")}".`);
+      await load(active);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Delete failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -171,10 +226,11 @@ function Dashboard({ admin }: { admin: Admin }) {
         {notice && <div className="formnote workspace-note">{notice}</div>}
         {active === "Overview" && <Overview metrics={metrics} data={data} />}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
-        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} />}
-        {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} />}
+        {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
+        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
-        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} />}
+        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
@@ -199,7 +255,7 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   );
 }
 
-function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview }: { movies: RecordItem[]; uploading: boolean; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void }) {
+function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
   return (
     <section className="grid">
       <article className="panel upload">
@@ -212,16 +268,16 @@ function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview }: { m
           <button className="primary" disabled={uploading}>{uploading ? "Uploading..." : "Upload title"}</button>
         </form>
       </article>
-      <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} compact />
+      <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact />
     </section>
   );
 }
 
-function MoviesPanel({ movies, onPublish, onPreview, compact = false }: { movies: RecordItem[]; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; compact?: boolean }) {
+function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact = false }: { movies: RecordItem[]; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void; compact?: boolean }) {
   return (
     <article className="panel">
       <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Movies"}</h2><p>{movies.length} movie records</p></div></div>
-      <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
+      <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button onClick={() => onEdit(movie)}>Edit</button><button className="danger" onClick={() => onDelete(movie)}>Delete</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
     </article>
   );
 }
@@ -230,8 +286,12 @@ function PreviewModal({ preview, onClose }: { preview: { title: string; url: str
   return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div><video src={preview.url} controls preload="metadata" /></article>;
 }
 
-function CatalogPanel({ collections, movies, onPreview }: { collections: RecordItem[]; movies: RecordItem[]; onPreview: (movie: RecordItem) => void }) {
-  return <section className="grid"><CollectionsPanel collections={collections} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} compact /></section>;
+function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordItem; loading: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  return <article className="panel upload editpanel"><div className="panelhead"><div><h2>Edit video</h2><p>{String(movie.title ?? "Untitled")}</p></div><button onClick={onCancel}>Cancel</button></div><form onSubmit={onSubmit}><label>Title<input name="title" required maxLength={160} defaultValue={String(movie.title ?? "")} /></label><label>Synopsis<textarea name="synopsis" rows={4} required defaultValue={String(movie.synopsis ?? "")} /></label><label>Maturity rating<input name="maturityRating" maxLength={20} defaultValue={String(movie.maturityRating ?? "")} /></label><label>Status<select name="status" defaultValue={String(movie.status ?? "DRAFT")}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="ARCHIVED">Archived</option></select></label><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save changes"}</button></form></article>;
+}
+
+function CatalogPanel({ collections, movies, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+  return <section className="grid"><CollectionsPanel collections={collections} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact /></section>;
 }
 
 function CollectionsPanel({ collections }: { collections: RecordItem[] }) {
