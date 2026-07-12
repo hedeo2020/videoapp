@@ -77,6 +77,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [data, setData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
+  const [preview, setPreview] = useState<{ title: string; url: string } | null>(null);
 
   const metrics = useMemo(() => [
     ["Movies", count(data.movies), "catalog"],
@@ -145,6 +146,16 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  function previewMovie(movie: RecordItem) {
+    const asset = firstAsset(movie);
+    if (!asset?.id) {
+      setNotice("No uploaded video asset is available for this title yet.");
+      return;
+    }
+    const token = sessionStorage.getItem("ss_admin_access") ?? "";
+    setPreview({ title: String(movie.title ?? "Video preview"), url: `${API}/admin/video-assets/${asset.id}/preview?token=${encodeURIComponent(token)}` });
+  }
+
   return (
     <div className="shell">
       <aside>
@@ -159,10 +170,11 @@ function Dashboard({ admin }: { admin: Admin }) {
         </header>
         {notice && <div className="formnote workspace-note">{notice}</div>}
         {active === "Overview" && <Overview metrics={metrics} data={data} />}
-        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} />}
-        {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} />}
+        {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
+        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} />}
+        {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
-        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} onUpload={uploadMovie} onPublish={publishMovie} />}
+        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
@@ -187,7 +199,7 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   );
 }
 
-function UploadsPanel({ movies, uploading, onUpload, onPublish }: { movies: RecordItem[]; uploading: boolean; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void }) {
+function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview }: { movies: RecordItem[]; uploading: boolean; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void }) {
   return (
     <section className="grid">
       <article className="panel upload">
@@ -200,22 +212,26 @@ function UploadsPanel({ movies, uploading, onUpload, onPublish }: { movies: Reco
           <button className="primary" disabled={uploading}>{uploading ? "Uploading..." : "Upload title"}</button>
         </form>
       </article>
-      <MoviesPanel movies={movies} onPublish={onPublish} compact />
+      <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} compact />
     </section>
   );
 }
 
-function MoviesPanel({ movies, onPublish, compact = false }: { movies: RecordItem[]; onPublish: (id: string) => void; compact?: boolean }) {
+function MoviesPanel({ movies, onPublish, onPreview, compact = false }: { movies: RecordItem[]; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; compact?: boolean }) {
   return (
     <article className="panel">
       <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Movies"}</h2><p>{movies.length} movie records</p></div></div>
-      <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div>)}</div>
+      <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
     </article>
   );
 }
 
-function CatalogPanel({ collections, movies }: { collections: RecordItem[]; movies: RecordItem[] }) {
-  return <section className="grid"><CollectionsPanel collections={collections} /><MoviesPanel movies={movies} onPublish={() => undefined} compact /></section>;
+function PreviewModal({ preview, onClose }: { preview: { title: string; url: string }; onClose: () => void }) {
+  return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div><video src={preview.url} controls preload="metadata" /></article>;
+}
+
+function CatalogPanel({ collections, movies, onPreview }: { collections: RecordItem[]; movies: RecordItem[]; onPreview: (movie: RecordItem) => void }) {
+  return <section className="grid"><CollectionsPanel collections={collections} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} compact /></section>;
 }
 
 function CollectionsPanel({ collections }: { collections: RecordItem[] }) {
@@ -253,6 +269,7 @@ function csrfHeaders(): Record<string, string> {
   return { ...authHeaders(), "x-csrf-token": sessionStorage.getItem("ss_csrf") ?? "" };
 }
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
+function firstAsset(movie: RecordItem): RecordItem | null { return asArray(movie.assets)[0] ?? null; }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
 function format(value: unknown) { if (value === null || value === undefined) return ""; if (typeof value === "object") return JSON.stringify(value); return String(value); }
