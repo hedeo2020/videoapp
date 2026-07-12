@@ -208,7 +208,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       return;
     }
     const token = sessionStorage.getItem("ss_admin_access") ?? "";
-    const format = String(asset.sourceStorageKey ?? asset.manifestStorageKey ?? "").split(".").pop()?.toLowerCase() ?? "unknown";
+    const format = String(asset.manifestStorageKey ?? asset.sourceStorageKey ?? "").split(".").pop()?.toLowerCase() ?? "unknown";
     const playable = ["mp4", "webm", "mov"].includes(format);
     setPreview({ title: String(movie.title ?? "Video preview"), url: `${API}/admin/video-assets/${asset.id}/preview?token=${encodeURIComponent(token)}`, playable, format });
   }
@@ -266,8 +266,8 @@ function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview, onEdi
           <label>Title<input name="title" required maxLength={160} /></label>
           <label>Synopsis<textarea name="synopsis" rows={4} /></label>
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
-          <label>Video file<input name="file" type="file" accept="video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov" required /></label>
-          <small>For browser preview, upload MP4/H.264, WebM, or MOV. MKV files should be converted to MP4 before upload.</small>
+          <label>Video file<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" required /></label>
+          <small>Most video formats are accepted. The server creates an MP4/H.264 preview for browser playback after upload.</small>
           <button className="primary" disabled={uploading}>{uploading ? "Uploading..." : "Upload title"}</button>
         </form>
       </article>
@@ -287,7 +287,7 @@ function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact =
 
 function PreviewModal({ preview, onClose }: { preview: { title: string; url: string; playable: boolean; format: string }; onClose: () => void }) {
   const [error, setError] = useState("");
-  return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div>{!preview.playable && <div className="formnote">This file is .{preview.format}. Most browsers cannot play it in-panel. Convert it to MP4/H.264 for preview, or use Download source to check it locally.</div>}<video src={preview.url} controls preload="metadata" onError={() => setError("The browser could not play this file. If this is an old upload, the source file may be missing after redeploy. If it is MKV or another codec, convert it to MP4/H.264 and upload again.")} />{error && <div className="formerror">{error}</div>}<a className="download" href={preview.url}>Download source</a></article>;
+  return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div>{!preview.playable && <div className="formnote">A browser MP4 preview was not created for this file yet. Re-upload after redeploying the API with FFmpeg enabled, or use Download source to check it locally.</div>}<video src={preview.url} controls preload="metadata" onError={() => setError("The browser could not play this preview. Re-upload the video after redeploying the API so it can create a browser-compatible MP4 preview. Also make sure API storage is persistent at /data/media.")} />{error && <div className="formerror">{error}</div>}<a className="download" href={preview.url}>Download source/preview</a></article>;
 }
 
 function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordItem; loading: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {

@@ -1,4 +1,5 @@
 FROM node:22-alpine AS build
+RUN apk add --no-cache ffmpeg
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml ./
@@ -8,6 +9,7 @@ COPY apps/api apps/api
 RUN pnpm --filter @securestream/api build
 
 FROM node:22-alpine
+RUN apk add --no-cache ffmpeg
 RUN corepack enable
 WORKDIR /app
 COPY --from=build /app /app
