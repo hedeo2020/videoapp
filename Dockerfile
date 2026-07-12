@@ -11,6 +11,7 @@ FROM node:22-alpine
 RUN corepack enable
 WORKDIR /app
 COPY --from=build /app /app
+RUN mkdir -p /data/media && chown -R node:node /data
 USER node
 EXPOSE 4000
 CMD ["pnpm","--filter","@securestream/api","start"]
