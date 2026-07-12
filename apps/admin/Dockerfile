@@ -16,4 +16,6 @@ ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY --from=build /app /app
 EXPOSE 3000
-CMD ["pnpm","--filter","@securestream/admin","start","--","-H","0.0.0.0","-p","3000"]
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+CMD ["pnpm","--filter","@securestream/admin","start"]
