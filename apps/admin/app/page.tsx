@@ -76,6 +76,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [active, setActive] = useState<Tab>("Overview");
   const [data, setData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(null);
   const [editing, setEditing] = useState<RecordItem | null>(null);
@@ -116,11 +117,10 @@ function Dashboard({ admin }: { admin: Admin }) {
     event.preventDefault();
     const form = event.currentTarget;
     setLoading(true);
+    setUploadProgress(0);
     setNotice("");
     try {
-      const response = await fetch(`${API}/admin/uploads/direct`, { method: "POST", credentials: "include", headers: csrfHeaders(), body: new FormData(form) });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error?.message ?? "Upload failed");
+      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress);
       form.reset();
       setNotice(`Uploaded "${payload.title}" as a draft title.`);
       await load("Uploads");
@@ -128,6 +128,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       setNotice(error instanceof Error ? error.message : "Upload failed.");
     } finally {
       setLoading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -210,7 +211,8 @@ function Dashboard({ admin }: { admin: Admin }) {
     const token = sessionStorage.getItem("ss_admin_access") ?? "";
     const format = String(asset.manifestStorageKey ?? asset.sourceStorageKey ?? "").split(".").pop()?.toLowerCase() ?? "unknown";
     const playable = ["mp4", "webm", "mov"].includes(format);
-    setPreview({ title: String(movie.title ?? "Video preview"), url: `${API}/admin/video-assets/${asset.id}/preview?token=${encodeURIComponent(token)}`, playable, format });
+    const baseUrl = `${API}/admin/video-assets/${asset.id}/preview`;
+    setPreview({ title: String(movie.title ?? "Video preview"), url: token ? `${baseUrl}?token=${encodeURIComponent(token)}` : baseUrl, playable, format });
   }
 
   return (
@@ -232,7 +234,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
-        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
@@ -257,7 +259,7 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   );
 }
 
-function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+function UploadsPanel({ movies, uploading, uploadProgress, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
   return (
     <section className="grid">
       <article className="panel upload">
@@ -268,7 +270,8 @@ function UploadsPanel({ movies, uploading, onUpload, onPublish, onPreview, onEdi
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
           <label>Video file<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" required /></label>
           <small>Most video formats are accepted. The server creates an MP4/H.264 preview for browser playback after upload.</small>
-          <button className="primary" disabled={uploading}>{uploading ? "Uploading..." : "Upload title"}</button>
+          {uploadProgress !== null && <div className="uploadprogress"><span style={{ width: `${uploadProgress}%` }} /><b>{uploadProgress < 100 ? `Uploading ${uploadProgress}%` : "Processing preview..."}</b></div>}
+          <button className="primary" disabled={uploading}>{uploading ? uploadProgress !== null && uploadProgress < 100 ? `Uploading ${uploadProgress}%` : "Processing..." : "Upload title"}</button>
         </form>
       </article>
       <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact />
@@ -323,6 +326,29 @@ async function apiGet(path: string) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message ?? `Could not load ${path}`);
   return payload;
+}
+
+function uploadWithProgress(url: string, body: FormData, headers: Record<string, string>, onProgress: (progress: number) => void): Promise<RecordItem> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", url);
+    request.withCredentials = true;
+    Object.entries(headers).forEach(([key, value]) => request.setRequestHeader(key, value));
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+    };
+    request.onload = () => {
+      const payload = JSON.parse(request.responseText || "{}");
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(100);
+        resolve(payload);
+      } else {
+        reject(new Error(payload.error?.message ?? "Upload failed"));
+      }
+    };
+    request.onerror = () => reject(new Error("Upload request could not reach the API."));
+    request.send(body);
+  });
 }
 
 function authHeaders(): Record<string, string> {
