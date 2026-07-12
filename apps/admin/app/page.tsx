@@ -13,7 +13,7 @@ export default function App() {
   const [checking, setChecking] = useState(true);
 
   useEffect(() => {
-    fetch(`${API}/admin/auth/me`, { credentials: "include" })
+    fetch(`${API}/admin/auth/me`, { credentials: "include", headers: authHeaders() })
       .then((response) => (response.ok ? response.json() : null))
       .then(setAdmin)
       .catch(() => setAdmin(null))
@@ -44,6 +44,7 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) return setError(payload.error?.message ?? "Sign in failed");
       sessionStorage.setItem("ss_csrf", payload.csrfToken);
+      sessionStorage.setItem("ss_admin_access", payload.accessToken);
       onLogin(payload.user);
     } catch {
       setError("Sign in request could not reach the API. Check NEXT_PUBLIC_API_URL and ADMIN_ORIGIN in Coolify.");
@@ -76,7 +77,6 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [data, setData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState("");
-  const csrf = () => sessionStorage.getItem("ss_csrf") ?? "";
 
   const metrics = useMemo(() => [
     ["Movies", count(data.movies), "catalog"],
@@ -115,7 +115,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     setLoading(true);
     setNotice("");
     try {
-      const response = await fetch(`${API}/admin/uploads/direct`, { method: "POST", credentials: "include", headers: { "x-csrf-token": csrf() }, body: new FormData(event.currentTarget) });
+      const response = await fetch(`${API}/admin/uploads/direct`, { method: "POST", credentials: "include", headers: csrfHeaders(), body: new FormData(event.currentTarget) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "Upload failed");
       event.currentTarget.reset();
@@ -132,7 +132,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     setLoading(true);
     setNotice("");
     try {
-      const response = await fetch(`${API}/admin/movies/${id}/publish`, { method: "POST", credentials: "include", headers: { "x-csrf-token": csrf() } });
+      const response = await fetch(`${API}/admin/movies/${id}/publish`, { method: "POST", credentials: "include", headers: csrfHeaders() });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "Publish failed");
       setNotice("Movie published.");
@@ -238,12 +238,19 @@ function JsonPanel({ title, value }: { title: string; value: unknown }) {
 }
 
 async function apiGet(path: string) {
-  const response = await fetch(`${API}${path}`, { credentials: "include" });
+  const response = await fetch(`${API}${path}`, { credentials: "include", headers: authHeaders() });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error?.message ?? `Could not load ${path}`);
   return payload;
 }
 
+function authHeaders(): Record<string, string> {
+  const token = sessionStorage.getItem("ss_admin_access");
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+function csrfHeaders(): Record<string, string> {
+  return { ...authHeaders(), "x-csrf-token": sessionStorage.getItem("ss_csrf") ?? "" };
+}
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
