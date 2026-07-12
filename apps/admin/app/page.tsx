@@ -112,13 +112,14 @@ function Dashboard({ admin }: { admin: Admin }) {
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
     setLoading(true);
     setNotice("");
     try {
-      const response = await fetch(`${API}/admin/uploads/direct`, { method: "POST", credentials: "include", headers: csrfHeaders(), body: new FormData(event.currentTarget) });
+      const response = await fetch(`${API}/admin/uploads/direct`, { method: "POST", credentials: "include", headers: csrfHeaders(), body: new FormData(form) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "Upload failed");
-      event.currentTarget.reset();
+      form.reset();
       setNotice(`Uploaded "${payload.title}" as a draft title.`);
       await load("Uploads");
     } catch (error) {
