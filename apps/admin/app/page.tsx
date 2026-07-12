@@ -15,7 +15,10 @@ export default function App() {
   useEffect(() => {
     fetch(`${API}/admin/auth/me`, { credentials: "include", headers: authHeaders() })
       .then((response) => (response.ok ? response.json() : null))
-      .then(setAdmin)
+      .then((payload) => {
+        if (payload?.accessToken) sessionStorage.setItem("ss_admin_access", payload.accessToken);
+        setAdmin(payload);
+      })
       .catch(() => setAdmin(null))
       .finally(() => setChecking(false));
   }, []);
@@ -77,6 +80,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [data, setData] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadPhase, setUploadPhase] = useState("");
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(null);
   const [editing, setEditing] = useState<RecordItem | null>(null);
@@ -118,9 +122,10 @@ function Dashboard({ admin }: { admin: Admin }) {
     const form = event.currentTarget;
     setLoading(true);
     setUploadProgress(0);
+    setUploadPhase("Uploading");
     setNotice("");
     try {
-      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress);
+      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress, setUploadPhase);
       form.reset();
       setNotice(`Uploaded "${payload.title}" as a draft title.`);
       await load("Uploads");
@@ -129,6 +134,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     } finally {
       setLoading(false);
       setUploadProgress(null);
+      setUploadPhase("");
     }
   }
 
@@ -234,7 +240,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
-        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
@@ -259,7 +265,7 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   );
 }
 
-function UploadsPanel({ movies, uploading, uploadProgress, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+function UploadsPanel({ movies, uploading, uploadProgress, uploadPhase, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; uploadPhase: string; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
   return (
     <section className="grid">
       <article className="panel upload">
@@ -270,8 +276,8 @@ function UploadsPanel({ movies, uploading, uploadProgress, onUpload, onPublish, 
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
           <label>Video file<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" required /></label>
           <small>Most video formats are accepted. The server creates an MP4/H.264 preview for browser playback after upload.</small>
-          {uploadProgress !== null && <div className="uploadprogress"><span style={{ width: `${uploadProgress}%` }} /><b>{uploadProgress < 100 ? `Uploading ${uploadProgress}%` : "Processing preview..."}</b></div>}
-          <button className="primary" disabled={uploading}>{uploading ? uploadProgress !== null && uploadProgress < 100 ? `Uploading ${uploadProgress}%` : "Processing..." : "Upload title"}</button>
+          {uploadProgress !== null && <div className={`uploadprogress ${uploadPhase === "Converting preview" ? "processing" : ""}`}><span style={{ width: `${uploadProgress}%` }} /><b>{uploadPhase === "Converting preview" ? "Converting preview..." : `Uploading ${uploadProgress}%`}</b></div>}
+          <button className="primary" disabled={uploading}>{uploading ? uploadPhase || "Working..." : "Upload title"}</button>
         </form>
       </article>
       <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact />
@@ -290,7 +296,22 @@ function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact =
 
 function PreviewModal({ preview, onClose }: { preview: { title: string; url: string; playable: boolean; format: string }; onClose: () => void }) {
   const [error, setError] = useState("");
-  return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div>{!preview.playable && <div className="formnote">A browser MP4 preview was not created for this file yet. Re-upload after redeploying the API with FFmpeg enabled, or use Download source to check it locally.</div>}<video src={preview.url} controls preload="metadata" onError={() => setError("The browser could not play this preview. Re-upload the video after redeploying the API so it can create a browser-compatible MP4 preview. Also make sure API storage is persistent at /data/media.")} />{error && <div className="formerror">{error}</div>}<a className="download" href={preview.url}>Download source/preview</a></article>;
+  const [videoUrl, setVideoUrl] = useState("");
+  useEffect(() => {
+    setError("");
+    setVideoUrl("");
+    let objectUrl = "";
+    fetch(preview.url, { credentials: "include", headers: authHeaders() })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Preview could not be loaded.");
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob);
+        setVideoUrl(objectUrl);
+      })
+      .catch((caught) => setError(caught instanceof Error ? caught.message : "Preview could not be loaded."));
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [preview.url]);
+  return <article className="panel preview"><div className="panelhead"><div><h2>Check video before publishing</h2><p>{preview.title}</p></div><button onClick={onClose}>Close</button></div>{!preview.playable && <div className="formnote">A browser MP4 preview was not created for this file yet. Re-upload after redeploying the API with FFmpeg enabled, or use Download source to check it locally.</div>}{!videoUrl && !error && <div className="formnote">Loading preview...</div>}{videoUrl && <video src={videoUrl} controls preload="metadata" onError={() => setError("The browser could not play this preview. Re-upload the video after redeploying the API so it can create a browser-compatible MP4 preview. Also make sure API storage is persistent at /data/media.")} />}{error && <div className="formerror">{error}</div>}<a className="download" href={preview.url}>Download source/preview</a></article>;
 }
 
 function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordItem; loading: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -328,15 +349,15 @@ async function apiGet(path: string) {
   return payload;
 }
 
-function uploadWithProgress(url: string, body: FormData, headers: Record<string, string>, onProgress: (progress: number) => void): Promise<RecordItem> {
+function uploadWithProgress(url: string, body: FormData, headers: Record<string, string>, onProgress: (progress: number) => void, onPhase: (phase: string) => void): Promise<RecordItem> {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("POST", url);
     request.withCredentials = true;
     Object.entries(headers).forEach(([key, value]) => request.setRequestHeader(key, value));
-    request.upload.onprogress = (event) => {
-      if (event.lengthComputable) onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
-    };
+    request.upload.onloadstart = () => onPhase("Uploading");
+    request.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
+    request.upload.onload = () => { onProgress(100); onPhase("Converting preview"); };
     request.onload = () => {
       const payload = JSON.parse(request.responseText || "{}");
       if (request.status >= 200 && request.status < 300) {
