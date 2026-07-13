@@ -13,9 +13,14 @@ services:
     build: { context: ., dockerfile: apps/api/Dockerfile }
     env_file: .env
     ports: ["4000:4000"]
+    volumes: [media-data:/data]
     depends_on: { postgres: { condition: service_healthy }, redis: { condition: service_healthy } }
   admin:
-    build: { context: ., dockerfile: apps/admin/Dockerfile }
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
     env_file: .env
     ports: ["3000:3000"]
   worker:
