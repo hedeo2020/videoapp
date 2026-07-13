@@ -651,6 +651,44 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function deleteBackup(backup: RecordItem) {
+    const name = String(backup.name ?? "");
+    if (!name || !confirm(`Delete backup "${name}" from this server?`)) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/backups/${encodeURIComponent(name)}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Backup delete failed");
+      }
+      setNotice("Backup deleted.");
+      await load("Backup & Restore");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Backup delete failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function uploadBackupToGoogleDrive(backup: RecordItem) {
+    const name = String(backup.name ?? "");
+    if (!name) return;
+    setLoading(true);
+    setNotice("Uploading backup to Google Drive...");
+    try {
+      const response = await fetch(`${API}/admin/backups/${encodeURIComponent(name)}/google-drive`, { method: "POST", credentials: "include", headers: csrfHeaders() });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Google Drive upload failed");
+      setNotice(`Uploaded to Google Drive: ${String(payload.name ?? name)}`);
+      await load("Backup & Restore");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Google Drive upload failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -697,7 +735,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Watermark Trace" && <WatermarkTracePanel rows={asArray(data.playback)} />}
-        {active === "Backup & Restore" && <BackupPanel backups={data.backups as RecordItem | undefined} loading={loading} onCreate={createBackup} onRestore={restoreBackup} />}
+        {active === "Backup & Restore" && <BackupPanel backups={data.backups as RecordItem | undefined} loading={loading} onCreate={createBackup} onRestore={restoreBackup} onDelete={deleteBackup} onDriveUpload={uploadBackupToGoogleDrive} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
         {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} />}
@@ -1285,26 +1323,28 @@ function WatermarkTracePanel({ rows }: { rows: RecordItem[] }) {
   );
 }
 
-function BackupPanel({ backups, loading, onCreate, onRestore }: { backups?: RecordItem; loading: boolean; onCreate: () => void; onRestore: (event: FormEvent<HTMLFormElement>) => void }) {
+function BackupPanel({ backups, loading, onCreate, onRestore, onDelete, onDriveUpload }: { backups?: RecordItem; loading: boolean; onCreate: () => void; onRestore: (event: FormEvent<HTMLFormElement>) => void; onDelete: (backup: RecordItem) => void; onDriveUpload: (backup: RecordItem) => void }) {
   const items = asArray(backups?.items);
+  const driveReady = Boolean(backups?.googleDriveConfigured);
   return (
     <section className="grid backupgrid">
       <article className="panel upload">
         <div className="panelhead"><div><h2>Create portable backup</h2><p>Includes users, folders, catalog, access rules, chats, notifications, watch data, and media files.</p></div><b>{items.length} backups</b></div>
         <div className="formnote">Backup files are URL/port safe. Media is stored by relative storage path, so it can restore on another server using a different domain.</div>
+        <div className="formnote">Google Drive: {driveReady ? "Connected by server environment variables." : "Not connected. Set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON and GOOGLE_DRIVE_FOLDER_ID on the API server."}</div>
         <button className="primary" disabled={loading} onClick={onCreate}>{loading ? "Working..." : "Create downloadable backup"}</button>
       </article>
       <article className="panel upload">
         <div className="panelhead"><div><h2>Restore backup</h2><p>Upload a SecureStream backup .tar from this or another server.</p></div><b>Destructive</b></div>
         <form onSubmit={onRestore}>
           <label>Backup .tar file<input name="file" type="file" accept=".tar,application/x-tar" required /></label>
-          <div className="formnote">Restore replaces the current platform data. Make sure this new server has persistent storage mounted before restoring.</div>
+          <div className="formnote">Restore first validates that the file is a real SecureStream backup with safe media paths. If validation fails, restore stops before replacing data.</div>
           <button className="danger" disabled={loading}>{loading ? "Restoring..." : "Restore backup"}</button>
         </form>
       </article>
       <article className="panel userspanel">
         <div className="panelhead"><div><h2>Available downloads</h2><p>Stored under {String(backups?.storageRoot ?? "your media storage")}/backups.</p></div></div>
-        <div className="rows">{items.map((backup) => <div className="row" key={String(backup.name)}><div><b>{String(backup.name)}</b><small>{formatBytes(backup.sizeBytes)} - {formatDateTime(backup.createdAt)}</small></div><a className="download" href={`${API}/admin/backups/${encodeURIComponent(String(backup.name))}/download`}>Download</a></div>)}</div>
+        <div className="rows">{items.map((backup) => <div className="row" key={String(backup.name)}><div><b>{String(backup.name)}</b><small>{formatBytes(backup.sizeBytes)} - {formatDateTime(backup.createdAt)}</small></div><div className="rowactions"><a className="download" href={`${API}/admin/backups/${encodeURIComponent(String(backup.name))}/download`}>Download</a><button disabled={loading || !driveReady} onClick={() => onDriveUpload(backup)}>Google Drive</button><button className="danger" disabled={loading} onClick={() => onDelete(backup)}>Delete</button></div></div>)}</div>
         {!items.length && <div className="formnote">No backups yet. Create one first.</div>}
       </article>
     </section>
