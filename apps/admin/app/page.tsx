@@ -107,6 +107,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (["Overview", "Collections", "Catalog", "Users"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
       if (tab === "Overview") await get("system", "/admin/system-status");
+      if (tab === "Overview") await get("cleanup", "/admin/storage-cleanup");
       if (tab === "Users") await get("users", "/admin/users");
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
       if (tab === "Playback sessions") await get("playback", "/admin/playback-sessions");
@@ -249,6 +250,24 @@ function Dashboard({ admin }: { admin: Admin }) {
       await load("API Tokens");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Token revoke failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runStorageCleanup() {
+    if (!confirm("Clean orphaned media files? This only removes files no longer referenced by the database and older than one hour.")) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/storage-cleanup`, { method: "POST", credentials: "include", headers: csrfHeaders() });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Cleanup failed");
+      setData((current) => ({ ...current, cleanup: payload }));
+      setNotice(`Cleanup finished: deleted ${payload.deletedFiles ?? 0} files and reclaimed ${formatBytes(payload.deletedBytes)}.`);
+      await load("Overview");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Cleanup failed.");
     } finally {
       setLoading(false);
     }
@@ -467,7 +486,7 @@ function Dashboard({ admin }: { admin: Admin }) {
           <div className="actions"><button onClick={() => load(active)} disabled={loading}>{loading ? "Refreshing..." : "Refresh"}</button><button className="primary" onClick={() => setActive("Uploads")}>+ Upload</button></div>
         </header>
         {notice && <div className="formnote workspace-note">{notice}</div>}
-        {active === "Overview" && <Overview metrics={metrics} data={data} />}
+        {active === "Overview" && <Overview metrics={metrics} data={data} loading={loading} onCleanup={runStorageCleanup} />}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onDeleteCollection={deleteCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
@@ -489,17 +508,39 @@ function Dashboard({ admin }: { admin: Admin }) {
   );
 }
 
-function Overview({ metrics, data }: { metrics: string[][]; data: Record<string, unknown> }) {
+function Overview({ metrics, data, loading, onCleanup }: { metrics: string[][]; data: Record<string, unknown>; loading: boolean; onCleanup: () => void }) {
   return (
     <>
       <section className="metrics">{metrics.map(([label, value, trend]) => <article key={label}><small>{label}</small><strong>{value}</strong><em>{trend}</em></article>)}</section>
       <SystemStatusPanel system={data.system as RecordItem | undefined} />
+      <StorageCleanupPanel cleanup={data.cleanup as RecordItem | undefined} loading={loading} onCleanup={onCleanup} />
       <section className="grid">
         <JsonPanel title="Queue snapshot" value={data.processing} />
         <JsonPanel title="Recent catalog" value={{ videos: count(data.movies), collections: count(data.collections), series: count(data.series) }} />
       </section>
     </>
   );
+}
+
+function StorageCleanupPanel({ cleanup, loading, onCleanup }: { cleanup?: RecordItem; loading: boolean; onCleanup: () => void }) {
+  const preview = asArray(cleanup?.preview);
+  return (
+    <article className="panel cleanuppanel">
+      <div className="panelhead"><div><h2>Storage cleanup</h2><p>Safely remove orphaned media files no longer referenced by videos, uploads, or renditions.</p></div><button className="danger" disabled={loading || !Number(cleanup?.orphanedFiles ?? 0)} onClick={onCleanup}>{loading ? "Working..." : "Clean orphaned files"}</button></div>
+      <div className="systemgrid cleanupgrid">
+        <StatusStat label="Reclaimable" value={formatBytes(cleanup?.reclaimableBytes)} note={`${Number(cleanup?.orphanedFiles ?? 0)} orphaned files`} />
+        <StatusStat label="Scanned files" value={String(cleanup?.totalFiles ?? 0)} note={`${Number(cleanup?.referencedFiles ?? 0)} referenced`} />
+        <StatusStat label="Last deleted" value={formatBytes(cleanup?.deletedBytes)} note={`${Number(cleanup?.deletedFiles ?? 0)} files deleted`} />
+        <StatusStat label="Failed" value={String(asArray(cleanup?.failed).length)} note="Files that could not be removed" />
+      </div>
+      {preview.length > 0 && <div className="cleanupfiles"><b>Cleanup preview</b>{preview.map((file) => <span key={String(file.key)}>{String(file.key)} · {formatBytes(file.sizeBytes)}</span>)}</div>}
+      {!cleanup && <div className="formnote">Cleanup report is loading.</div>}
+    </article>
+  );
+}
+
+function StatusStat({ label, value, note }: { label: string; value: string; note: string }) {
+  return <div className="statuscard"><small>{label}</small><strong>{value}</strong><em>{note}</em></div>;
 }
 
 function SystemStatusPanel({ system }: { system?: RecordItem }) {
