@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Storage", "Series", "Uploads", "Processing", "Collections", "Users", "Device Sessions", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Activity", "Trash", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -117,6 +117,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
       if (["Overview", "Videos", "Uploads", "Collections", "Catalog", "Users", "Video Editor"].includes(tab)) await get("movies", "/admin/movies");
       if (tab === "File Manager") await get("files", "/admin/files");
+      if (tab === "Storage") await get("storageBreakdown", "/admin/storage-breakdown");
       if (tab === "Video Editor") await get("editorJobs", "/admin/editor/jobs");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog", "Users"].includes(tab)) await get("collections", "/admin/collections");
@@ -124,6 +125,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "Overview") await get("system", "/admin/system-status");
       if (tab === "Overview") await get("cleanup", "/admin/storage-cleanup");
       if (tab === "Users") await get("users", "/admin/users");
+      if (tab === "Device Sessions") await get("deviceSessions", "/admin/device-sessions");
       if (tab === "Messages") await get("conversations", "/admin/conversations");
       if (tab === "Messages") await get("users", "/admin/users");
       if (tab === "Notifications") await get("notifications", "/admin/notifications");
@@ -131,6 +133,8 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
       if (["Playback sessions", "Watermark Trace"].includes(tab)) await get("playback", "/admin/playback-sessions");
       if (tab === "Backup & Restore") await get("backups", "/admin/backups");
+      if (tab === "Activity") await get("activity", "/admin/activity");
+      if (tab === "Trash") await get("trash", "/admin/trash");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
       if (tab === "Security") await get("security", "/admin/security-events");
       if (tab === "Settings") await get("settings", "/admin/settings");
@@ -349,7 +353,21 @@ function Dashboard({ admin }: { admin: Admin }) {
         method: "PATCH",
         credentials: "include",
         headers: { ...csrfHeaders(), "content-type": "application/json" },
-        body: JSON.stringify({ deleteOriginalAfterPreview: formData.get("deleteOriginalAfterPreview") === "on" }),
+        body: JSON.stringify({
+          deleteOriginalAfterPreview: formData.get("deleteOriginalAfterPreview") === "on",
+          maintenanceMode: formData.get("maintenanceMode") === "on",
+          maintenanceMessage: String(formData.get("maintenanceMessage") ?? ""),
+          backupScheduleEnabled: formData.get("backupScheduleEnabled") === "on",
+          backupScheduleHour: Number(formData.get("backupScheduleHour") ?? 2),
+          backupRetentionCount: Number(formData.get("backupRetentionCount") ?? 7),
+          backupScheduleDrive: formData.get("backupScheduleDrive") === "on",
+          storageWarningPercent: Number(formData.get("storageWarningPercent") ?? 80),
+          androidLatestVersionName: String(formData.get("androidLatestVersionName") ?? ""),
+          androidLatestVersionCode: Number(formData.get("androidLatestVersionCode") ?? 1),
+          androidUpdateRequired: formData.get("androidUpdateRequired") === "on",
+          androidUpdateMessage: String(formData.get("androidUpdateMessage") ?? ""),
+          androidDownloadUrl: optionalFormString(formData, "androidDownloadUrl") ?? null,
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "Settings update failed");
@@ -689,6 +707,72 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function runScheduledBackupNow() {
+    setLoading(true);
+    setNotice("Running scheduled backup now...");
+    try {
+      const response = await fetch(`${API}/admin/backups/run-scheduled-now`, { method: "POST", credentials: "include", headers: csrfHeaders() });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Scheduled backup failed");
+      setNotice(`Scheduled backup ready: ${payload.name}`);
+      await load("Backup & Restore");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Scheduled backup failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function testAlert() {
+    setLoading(true);
+    setNotice("Sending test alert...");
+    try {
+      const response = await fetch(`${API}/admin/alerts/test`, { method: "POST", credentials: "include", headers: csrfHeaders() });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Test alert failed");
+      setNotice(payload.sent ? "Test alert sent." : "No alert target is configured yet.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Test alert failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function revokeDeviceSession(session: RecordItem) {
+    const id = String(session.id ?? "");
+    if (!id || !confirm("Logout this device session?")) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`${API}/admin/device-sessions/${id}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) throw new Error("Could not revoke device session");
+      setNotice("Device session revoked.");
+      await load("Device Sessions");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not revoke device session.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function trashAction(kind: "users" | "movies", id: string, action: "restore" | "permanent") {
+    const permanent = action === "permanent";
+    if (permanent && !confirm("Permanently delete this item? This cannot be undone.")) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`${API}/admin/trash/${kind}/${id}/${action}`, { method: permanent ? "DELETE" : "POST", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Trash action failed");
+      }
+      setNotice(permanent ? "Item permanently deleted." : "Item restored.");
+      await load("Trash");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Trash action failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -725,20 +809,24 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Videos" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Video Editor" && <VideoEditorPanel movies={asArray(data.movies)} jobs={asArray(data.editorJobs)} loading={loading} onSubmit={createTrimJob} />}
         {active === "File Manager" && <FileManagerPanel files={asArray(data.files)} />}
+        {active === "Storage" && <StorageBreakdownPanel storage={data.storageBreakdown as RecordItem | undefined} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
         {active === "Users" && <UsersPanel users={asArray(data.users)} movies={asArray(data.movies)} collections={asArray(data.collections)} loading={loading} onCreate={createUser} onUpdate={updateUser} onDelete={deleteUser} />}
+        {active === "Device Sessions" && <DeviceSessionsPanel sessions={asArray(data.deviceSessions)} loading={loading} onRevoke={revokeDeviceSession} />}
         {active === "Messages" && <MessagesPanel conversations={asArray(data.conversations)} users={asArray(data.users)} loading={loading} onStart={startAdminConversation} onReply={sendAdminMessage} />}
         {active === "Notifications" && <NotificationsPanel notifications={asArray(data.notifications)} users={asArray(data.users)} loading={loading} onSend={sendNotification} />}
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Watermark Trace" && <WatermarkTracePanel rows={asArray(data.playback)} />}
-        {active === "Backup & Restore" && <BackupPanel backups={data.backups as RecordItem | undefined} loading={loading} onCreate={createBackup} onRestore={restoreBackup} onDelete={deleteBackup} onDriveUpload={uploadBackupToGoogleDrive} />}
+        {active === "Backup & Restore" && <BackupPanel backups={data.backups as RecordItem | undefined} loading={loading} onCreate={createBackup} onRestore={restoreBackup} onDelete={deleteBackup} onDriveUpload={uploadBackupToGoogleDrive} onScheduledNow={runScheduledBackupNow} />}
+        {active === "Activity" && <ActivityPanel rows={asArray(data.activity)} />}
+        {active === "Trash" && <TrashPanel trash={data.trash as RecordItem | undefined} loading={loading} onAction={trashAction} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
-        {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} />}
+        {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} onTestAlert={testAlert} />}
       </main>
     </div>
   );
@@ -1323,7 +1411,7 @@ function WatermarkTracePanel({ rows }: { rows: RecordItem[] }) {
   );
 }
 
-function BackupPanel({ backups, loading, onCreate, onRestore, onDelete, onDriveUpload }: { backups?: RecordItem; loading: boolean; onCreate: () => void; onRestore: (event: FormEvent<HTMLFormElement>) => void; onDelete: (backup: RecordItem) => void; onDriveUpload: (backup: RecordItem) => void }) {
+function BackupPanel({ backups, loading, onCreate, onRestore, onDelete, onDriveUpload, onScheduledNow }: { backups?: RecordItem; loading: boolean; onCreate: () => void; onRestore: (event: FormEvent<HTMLFormElement>) => void; onDelete: (backup: RecordItem) => void; onDriveUpload: (backup: RecordItem) => void; onScheduledNow: () => void }) {
   const items = asArray(backups?.items);
   const driveReady = Boolean(backups?.googleDriveConfigured);
   return (
@@ -1332,7 +1420,7 @@ function BackupPanel({ backups, loading, onCreate, onRestore, onDelete, onDriveU
         <div className="panelhead"><div><h2>Create portable backup</h2><p>Includes users, folders, catalog, access rules, chats, notifications, watch data, and media files.</p></div><b>{items.length} backups</b></div>
         <div className="formnote">Backup files are URL/port safe. Media is stored by relative storage path, so it can restore on another server using a different domain.</div>
         <div className="formnote">Google Drive: {driveReady ? "Connected by server environment variables." : "Not connected. Set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON and GOOGLE_DRIVE_FOLDER_ID on the API server."}</div>
-        <button className="primary" disabled={loading} onClick={onCreate}>{loading ? "Working..." : "Create downloadable backup"}</button>
+        <div className="rowactions"><button disabled={loading} onClick={onScheduledNow}>Run schedule now</button><button className="primary" disabled={loading} onClick={onCreate}>{loading ? "Working..." : "Create downloadable backup"}</button></div>
       </article>
       <article className="panel upload">
         <div className="panelhead"><div><h2>Restore backup</h2><p>Upload a SecureStream backup .tar from this or another server.</p></div><b>Destructive</b></div>
@@ -1351,22 +1439,114 @@ function BackupPanel({ backups, loading, onCreate, onRestore, onDelete, onDriveU
   );
 }
 
+function StorageBreakdownPanel({ storage }: { storage?: RecordItem }) {
+  const categories = asArray(storage?.categories);
+  return (
+    <section className="grid">
+      <article className="panel">
+        <div className="panelhead"><div><h2>Storage health</h2><p>{String(storage?.storageRoot ?? "Media storage")}</p></div><b>{Number(storage?.usedPercent ?? 0)}%</b></div>
+        <div className="meter"><span style={{ width: `${Math.min(100, Number(storage?.usedPercent ?? 0))}%` }} /></div>
+        <div className="tracefacts">
+          <span><b>Used</b>{formatBytes(storage?.usedBytes)}</span>
+          <span><b>Free</b>{formatBytes(storage?.freeBytes)}</span>
+          <span><b>Total</b>{formatBytes(storage?.totalBytes)}</span>
+          <span><b>Warning</b>{Number(storage?.warningPercent ?? 80)}%</span>
+        </div>
+        {Boolean(storage?.warning) && <div className="formnote dangertext">Storage is above the warning threshold. Check large previews/backups or run cleanup.</div>}
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Breakdown</h2><p>Largest file groups in media storage.</p></div></div>
+        <div className="rows">{categories.map((category) => <div className="row" key={String(category.name)}><div><b>{String(category.name)}</b><small>{Number(category.fileCount ?? 0)} files - {formatBytes(category.sizeBytes)}</small></div></div>)}</div>
+      </article>
+      <JsonPanel title="Largest files" value={Object.fromEntries(categories.map((category) => [String(category.name), category.largest]))} />
+    </section>
+  );
+}
+
+function DeviceSessionsPanel({ sessions, loading, onRevoke }: { sessions: RecordItem[]; loading: boolean; onRevoke: (session: RecordItem) => void }) {
+  return (
+    <article className="panel userspanel">
+      <div className="panelhead"><div><h2>Active device sessions</h2><p>Logout lost phones, old Android installs, or suspicious sessions.</p></div><b>{sessions.length} active</b></div>
+      <div className="rows">{sessions.map((session) => {
+        const user = session.user as RecordItem | undefined;
+        return <div className="row" key={String(session.id)}><div><b>{String(user?.email ?? session.userId)}</b><small>{String(user?.displayName ?? "Viewer")} - {String(session.deviceId ?? "unknown device")} - last used {formatDateTime(session.lastUsedAt)}</small></div><div className="rowactions"><button className="danger" disabled={loading} onClick={() => onRevoke(session)}>Logout device</button></div></div>;
+      })}</div>
+      {!sessions.length && <div className="formnote">No active device sessions.</div>}
+    </article>
+  );
+}
+
+function ActivityPanel({ rows }: { rows: RecordItem[] }) {
+  return (
+    <article className="panel userspanel">
+      <div className="panelhead"><div><h2>Admin activity timeline</h2><p>Recent privileged actions across the platform.</p></div><b>{rows.length} events</b></div>
+      <div className="rows">{rows.map((row) => {
+        const actor = row.actor as RecordItem | undefined;
+        return <div className="row" key={String(row.id)}><div><b>{String(row.action)}</b><small>{formatDateTime(row.createdAt)} - {String(actor?.email ?? "System")} - {String(row.targetType ?? "")} {String(row.targetId ?? "")}</small></div></div>;
+      })}</div>
+    </article>
+  );
+}
+
+function TrashPanel({ trash, loading, onAction }: { trash?: RecordItem; loading: boolean; onAction: (kind: "users" | "movies", id: string, action: "restore" | "permanent") => void }) {
+  const users = asArray(trash?.users);
+  const movies = asArray(trash?.movies);
+  const renderRow = (kind: "users" | "movies", item: RecordItem) => <div className="row" key={String(item.id)}><div><b>{String(item.email ?? item.title ?? item.id)}</b><small>{String(item.deletedReason ?? "Deleted")} - {formatDateTime(item.deletedAt)}</small></div><div className="rowactions"><button disabled={loading} onClick={() => onAction(kind, String(item.id), "restore")}>Restore</button><button className="danger" disabled={loading} onClick={() => onAction(kind, String(item.id), "permanent")}>Delete forever</button></div></div>;
+  return (
+    <section className="grid">
+      <article className="panel userspanel"><div className="panelhead"><div><h2>Deleted users</h2><p>Restore accounts or permanently remove them.</p></div><b>{users.length}</b></div><div className="rows">{users.map((item) => renderRow("users", item))}</div>{!users.length && <div className="formnote">No deleted users.</div>}</article>
+      <article className="panel userspanel"><div className="panelhead"><div><h2>Deleted videos</h2><p>Restore draft videos or permanently remove media files.</p></div><b>{movies.length}</b></div><div className="rows">{movies.map((item) => renderRow("movies", item))}</div>{!movies.length && <div className="formnote">No deleted videos.</div>}</article>
+    </section>
+  );
+}
+
 function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }) {
   return <article className="panel tablewrap"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? index)}>{columns.map((column) => <td key={column}>{format(row[column])}</td>)}</tr>)}</tbody></table></article>;
 }
 
-function SettingsPanel({ settings, loading, onSave }: { settings?: RecordItem; loading: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void }) {
+function SettingsPanel({ settings, loading, onSave, onTestAlert }: { settings?: RecordItem; loading: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void; onTestAlert: () => void }) {
+  const maintenance = (settings?.maintenance as RecordItem | undefined) ?? {};
+  const backupSchedule = (settings?.backupSchedule as RecordItem | undefined) ?? {};
+  const android = (settings?.android as RecordItem | undefined) ?? {};
   return (
     <section className="grid">
       <article className="panel">
-        <div className="panelhead"><div><h2>Storage behavior</h2><p>Control how uploaded videos are kept after the playable MP4 preview is ready.</p></div></div>
+        <div className="panelhead"><div><h2>Platform controls</h2><p>Maintenance, backups, alerts, storage warnings, and Android update checks.</p></div></div>
         <form className="stackform" onSubmit={onSave}>
           <label className="checkrow">
             <input name="deleteOriginalAfterPreview" type="checkbox" defaultChecked={Boolean(settings?.deleteOriginalAfterPreview)} />
             <span><b>Delete original after MP4 preview is ready</b><small>New uploads will keep only the browser/app playable MP4 after conversion succeeds. If conversion fails, the original stays.</small></span>
           </label>
-          <div className="formnote">Use this to save storage. Leave it off if you still want to keep original MKV/MOV/source files for future re-editing.</div>
-          <button className="primary" disabled={loading}>{loading ? "Saving..." : "Save settings"}</button>
+          <label className="checkrow">
+            <input name="maintenanceMode" type="checkbox" defaultChecked={Boolean(maintenance.enabled)} />
+            <span><b>Maintenance mode</b><small>Viewer logins and viewer API calls pause, while admins can still login and manage the system.</small></span>
+          </label>
+          <label>Maintenance message<input name="maintenanceMessage" defaultValue={String(maintenance.message ?? "")} /></label>
+          <div className="formgrid">
+            <label>Backup hour (0-23)<input name="backupScheduleHour" type="number" min="0" max="23" defaultValue={String(backupSchedule.hour ?? 2)} /></label>
+            <label>Keep backups<input name="backupRetentionCount" type="number" min="1" max="60" defaultValue={String(backupSchedule.retentionCount ?? 7)} /></label>
+            <label>Storage warning %<input name="storageWarningPercent" type="number" min="1" max="99" defaultValue={String(settings?.storageWarningPercent ?? 80)} /></label>
+          </div>
+          <label className="checkrow">
+            <input name="backupScheduleEnabled" type="checkbox" defaultChecked={Boolean(backupSchedule.enabled)} />
+            <span><b>Enable daily backup schedule</b><small>The API creates one portable backup per day at the selected hour.</small></span>
+          </label>
+          <label className="checkrow">
+            <input name="backupScheduleDrive" type="checkbox" defaultChecked={Boolean(backupSchedule.uploadToDrive)} />
+            <span><b>Upload scheduled backups to Google Drive</b><small>Requires the Google Drive service account env variables.</small></span>
+          </label>
+          <div className="formgrid">
+            <label>Android version name<input name="androidLatestVersionName" defaultValue={String(android.latestVersionName ?? "1.0.0")} /></label>
+            <label>Android version code<input name="androidLatestVersionCode" type="number" min="1" defaultValue={String(android.latestVersionCode ?? 1)} /></label>
+          </div>
+          <label className="checkrow">
+            <input name="androidUpdateRequired" type="checkbox" defaultChecked={Boolean(android.required)} />
+            <span><b>Force Android update</b><small>The app can block old versions when AI Studio adds the version check.</small></span>
+          </label>
+          <label>Android update message<input name="androidUpdateMessage" defaultValue={String(android.message ?? "")} /></label>
+          <label>Android download URL<input name="androidDownloadUrl" placeholder="https://..." defaultValue={String(android.downloadUrl ?? "")} /></label>
+          <div className="formnote">Alerts configured: {settings?.alertsConfigured ? "Yes" : "No"}. Use ALERT_WEBHOOK_URL or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID on the API server.</div>
+          <div className="rowactions"><button type="button" disabled={loading} onClick={onTestAlert}>Test alert</button><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save settings"}</button></div>
         </form>
       </article>
       <JsonPanel title="Runtime settings" value={settings} />
@@ -1505,17 +1685,21 @@ function panelSubtitle(tab: Tab) {
     Videos: "Review and publish uploaded videos.",
     "Video Editor": "Trim source videos and save edited clips as safe draft copies.",
     "File Manager": "Track uploaded files, sizes, formats, and storage details.",
+    Storage: "Monitor storage quota, warning threshold, and largest file groups.",
     Series: "Manage episodic catalog records.",
     Uploads: "Upload source files and create draft videos.",
     Processing: "Monitor encoding and packaging jobs.",
     Collections: "Browse configured home-screen rails.",
     Users: "Review viewer and operator accounts.",
+    "Device Sessions": "Logout active devices and manage user sessions.",
     Messages: "Reply to viewer messages.",
     Notifications: "Send updates to viewer dashboards.",
     "API Tokens": "Create and revoke automation tokens for n8n workflows.",
     "Playback sessions": "Inspect recent stream grants.",
     "Watermark Trace": "Paste a playback watermark and identify the user/session.",
     "Backup & Restore": "Download or restore a portable server migration backup.",
+    Activity: "Review recent admin actions in timeline form.",
+    Trash: "Restore or permanently delete removed users and videos.",
     "Audit logs": "Trace privileged admin actions.",
     Security: "Review security events.",
     Settings: "Inspect runtime configuration.",

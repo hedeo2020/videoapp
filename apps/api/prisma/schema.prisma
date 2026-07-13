@@ -56,6 +56,8 @@ model User {
   lockedUntil      DateTime?
   accessRestricted Boolean           @default(false)
   defaultCollectionId String?
+  deletedAt        DateTime?
+  deletedReason    String?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   defaultCollection Collection?       @relation("UserDefaultCollection", fields: [defaultCollectionId], references: [id], onDelete: SetNull)
@@ -72,6 +74,8 @@ model User {
   supportConversations SupportConversation[] @relation("ConversationUser")
   supportMessages SupportMessage[] @relation("MessageSender")
   notifications    UserNotification[]
+
+  @@index([deletedAt])
 }
 
 model ApiToken {
@@ -148,11 +152,15 @@ model Movie {
   availabilityStart DateTime?
   availabilityEnd   DateTime?
   version           Int              @default(1)
+  deletedAt         DateTime?
+  deletedReason     String?
   createdAt         DateTime         @default(now())
   updatedAt         DateTime         @updatedAt
   assets            VideoAsset[]
   collectionItems   CollectionItem[]
   userAccess        UserMovieAccess[]
+
+  @@index([deletedAt])
 }
 
 model Series {
