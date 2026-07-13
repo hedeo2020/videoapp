@@ -13,15 +13,20 @@ export function movieHasReadyAsset(movie: CatalogMovie) {
 }
 
 export function toMovieCard(movie: CatalogMovie) {
+  const durationSeconds = movie.assets?.find((asset) => asset.state === "READY" && asset.durationSeconds && asset.durationSeconds > 0)?.durationSeconds ?? null;
+  const durationMinutes = durationSeconds ? Math.max(1, Math.round(durationSeconds / 60)) : null;
   return {
     id: movie.id,
     kind: "MOVIE" as const,
+    kindLabel: "Video",
     title: movie.title,
     slug: movie.slug,
     synopsis: movie.synopsis,
     maturityRating: movie.maturityRating,
     artworkUrl: movie.posterUrl,
-    durationSeconds: movie.assets?.find((asset) => asset.state === "READY")?.durationSeconds,
+    durationSeconds,
+    durationMinutes,
+    durationText: durationMinutes ? `${durationMinutes}m` : null,
   };
 }
 
@@ -35,5 +40,7 @@ export function toSeriesCard(series: CatalogSeries) {
     artworkUrl: series.posterUrl,
     maturityRating: null,
     durationSeconds: null,
+    durationMinutes: null,
+    durationText: null,
   };
 }
