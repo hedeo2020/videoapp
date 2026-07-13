@@ -99,9 +99,9 @@ function Dashboard({ admin }: { admin: Admin }) {
     try {
       const next: Record<string, unknown> = { ...data };
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
-      if (["Overview", "Videos", "Uploads", "Collections", "Catalog"].includes(tab)) await get("movies", "/admin/movies");
+      if (["Overview", "Videos", "Uploads", "Collections", "Catalog", "Users"].includes(tab)) await get("movies", "/admin/movies");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
-      if (["Overview", "Collections", "Catalog"].includes(tab)) await get("collections", "/admin/collections");
+      if (["Overview", "Collections", "Catalog", "Users"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
       if (tab === "Overview") await get("system", "/admin/system-status");
       if (tab === "Users") await get("users", "/admin/users");
@@ -300,6 +300,63 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/users`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify(userPayload(new FormData(event.currentTarget), true)) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "User creation failed");
+      event.currentTarget.reset();
+      setNotice("User created.");
+      await load("Users");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "User creation failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function updateUser(user: RecordItem, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user.id) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/users/${user.id}`, { method: "PATCH", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify(userPayload(new FormData(event.currentTarget), false)) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "User update failed");
+      setNotice("User updated.");
+      await load("Users");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "User update failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteUser(user: RecordItem) {
+    if (!user.id) return;
+    const confirmed = confirm(`Delete user "${String(user.email ?? "this user")}"? This removes their account, sessions, history, and access rules.`);
+    if (!confirmed) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/users/${user.id}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "User delete failed");
+      }
+      setNotice("User deleted.");
+      await load("Users");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "User delete failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -335,7 +392,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
-        {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
+        {active === "Users" && <UsersPanel users={asArray(data.users)} movies={asArray(data.movies)} collections={asArray(data.collections)} loading={loading} onCreate={createUser} onUpdate={updateUser} onDelete={deleteUser} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
@@ -539,6 +596,59 @@ function MovieChecklist({ movies, selectedIds = [] }: { movies: RecordItem[]; se
   );
 }
 
+function UsersPanel({ users, movies, collections, loading, onCreate, onUpdate, onDelete }: { users: RecordItem[]; movies: RecordItem[]; collections: RecordItem[]; loading: boolean; onCreate: (event: FormEvent<HTMLFormElement>) => void; onUpdate: (user: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (user: RecordItem) => void }) {
+  return (
+    <section className="grid usersgrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Create user</h2><p>Add viewer/operator accounts and choose their allowed videos.</p></div><b>{users.length} users</b></div>
+        <form onSubmit={onCreate}>
+          <label>Email<input name="email" type="email" required /></label>
+          <label>Display name<input name="displayName" required minLength={2} maxLength={80} /></label>
+          <label>Password<input name="password" type="password" required minLength={12} /></label>
+          <div className="folderfields">
+            <label>Role<select name="role" defaultValue="VIEWER"><option value="VIEWER">Viewer</option><option value="EDITOR">Editor</option><option value="ADMIN">Admin</option><option value="SUPER_ADMIN">Super admin</option></select></label>
+            <label>Status<select name="status" defaultValue="ACTIVE"><option value="ACTIVE">Active</option><option value="SUSPENDED">Suspended</option><option value="DISABLED">Disabled</option></select></label>
+          </div>
+          <label className="toggle"><input name="accessRestricted" type="checkbox" defaultChecked /> Restrict this user to selected folders/videos</label>
+          <AccessPicker movies={movies} collections={collections} />
+          <button className="primary" disabled={loading}>Create user</button>
+        </form>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Manage users</h2><p>Rules apply to catalog, search, Play Now, and offline downloads.</p></div></div>
+        <div className="userlist">{users.map((user) => <UserEditor key={String(user.id)} user={user} movies={movies} collections={collections} loading={loading} onUpdate={onUpdate} onDelete={onDelete} />)}</div>
+      </article>
+    </section>
+  );
+}
+
+function UserEditor({ user, movies, collections, loading, onUpdate, onDelete }: { user: RecordItem; movies: RecordItem[]; collections: RecordItem[]; loading: boolean; onUpdate: (user: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (user: RecordItem) => void }) {
+  return (
+    <form className="foldercard usercard" onSubmit={(event) => onUpdate(user, event)}>
+      <div className="panelhead"><div><h3>{String(user.email ?? "User")}</h3><p>{String(user.displayName ?? "")} - {String(user.role ?? "")} - {String(user.status ?? "")}</p></div><div className="rowactions"><button type="button" className="danger" disabled={loading} onClick={() => onDelete(user)}>Delete</button><button disabled={loading}>Save user</button></div></div>
+      <div className="folderfields">
+        <label>Email<input name="email" type="email" required defaultValue={String(user.email ?? "")} /></label>
+        <label>Name<input name="displayName" required minLength={2} maxLength={80} defaultValue={String(user.displayName ?? "")} /></label>
+        <label>Role<select name="role" defaultValue={String(user.role ?? "VIEWER")}><option value="VIEWER">Viewer</option><option value="EDITOR">Editor</option><option value="ADMIN">Admin</option><option value="SUPER_ADMIN">Super admin</option></select></label>
+        <label>Status<select name="status" defaultValue={String(user.status ?? "ACTIVE")}><option value="ACTIVE">Active</option><option value="SUSPENDED">Suspended</option><option value="DISABLED">Disabled</option></select></label>
+      </div>
+      <label>New password (leave blank to keep current)<input name="password" type="password" minLength={12} placeholder="Optional" /></label>
+      <label className="toggle"><input name="accessRestricted" type="checkbox" defaultChecked={Boolean(user.accessRestricted)} /> Restrict this user to selected folders/videos</label>
+      <AccessPicker movies={movies} collections={collections} selectedMovieIds={userMovieAccessIds(user)} selectedCollectionIds={userCollectionAccessIds(user)} />
+    </form>
+  );
+}
+
+function AccessPicker({ movies, collections, selectedMovieIds = [], selectedCollectionIds = [] }: { movies: RecordItem[]; collections: RecordItem[]; selectedMovieIds?: string[]; selectedCollectionIds?: string[] }) {
+  const published = movies.filter((movie) => movie.status === "PUBLISHED");
+  return (
+    <div className="accesspicker">
+      <div><b>Allowed folders</b><p>When restriction is enabled, only these folders and selected videos are visible.</p><div className="checkgrid">{collections.map((collection) => <label key={String(collection.id)}><input name="collectionIds" type="checkbox" value={String(collection.id)} defaultChecked={selectedCollectionIds.includes(String(collection.id))} /> <span>{folderLabel(collection)}</span></label>)}</div></div>
+      <div><b>Allowed videos</b><p>Direct video access can be combined with folder access.</p><div className="checkgrid">{published.map((movie) => <label key={String(movie.id)}><input name="movieIds" type="checkbox" value={String(movie.id)} defaultChecked={selectedMovieIds.includes(String(movie.id))} /> <span>{String(movie.title ?? "Untitled")}</span></label>)}</div></div>
+    </div>
+  );
+}
+
 function SeriesPanel({ series }: { series: RecordItem[] }) {
   return <article className="panel"><div className="panelhead"><div><h2>Series</h2><p>{series.length} series records</p></div></div><div className="rows">{series.map((row) => <div className="row" key={String(row.id)}><div><b>{String(row.title ?? "Untitled")}</b><small>{String(row.status ?? "DRAFT")} - {count(row.seasons)} seasons</small></div></div>)}</div></article>;
 }
@@ -626,9 +736,27 @@ function collectionPayload(formData: FormData) {
     items: movieIds.map((movieId, index) => ({ movieId, sortOrder: index })),
   };
 }
+function userPayload(formData: FormData, requirePassword: boolean) {
+  const password = String(formData.get("password") ?? "");
+  const payload: Record<string, unknown> = {
+    email: String(formData.get("email") ?? "").trim(),
+    displayName: String(formData.get("displayName") ?? "").trim(),
+    role: String(formData.get("role") ?? "VIEWER"),
+    status: String(formData.get("status") ?? "ACTIVE"),
+    accessRestricted: formData.get("accessRestricted") === "on",
+    access: {
+      movieIds: formData.getAll("movieIds").map(String).filter(Boolean),
+      collectionIds: formData.getAll("collectionIds").map(String).filter(Boolean),
+    },
+  };
+  if (password || requirePassword) payload.password = password;
+  return payload;
+}
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
 function firstAsset(movie: RecordItem): RecordItem | null { return asArray(movie.assets)[0] ?? null; }
 function collectionMovieIds(collection: RecordItem) { return asArray(collection.items).map((item) => String(item.movieId ?? (item.movie as RecordItem | undefined)?.id ?? "")).filter(Boolean); }
+function userMovieAccessIds(user: RecordItem) { return asArray(user.movieAccess).map((item) => String(item.movieId ?? "")).filter(Boolean); }
+function userCollectionAccessIds(user: RecordItem) { return asArray(user.collectionAccess).map((item) => String(item.collectionId ?? "")).filter(Boolean); }
 function folderLabel(collection: RecordItem) { return `${String((collection.parent as RecordItem | undefined)?.name ? `${(collection.parent as RecordItem).name} / ` : "")}${String(collection.name ?? "Untitled")}`; }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }

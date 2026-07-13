@@ -54,6 +54,7 @@ model User {
   emailVerifiedAt  DateTime?
   failedLoginCount Int               @default(0)
   lockedUntil      DateTime?
+  accessRestricted Boolean           @default(false)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   sessions         RefreshSession[]
@@ -61,6 +62,8 @@ model User {
   progress         WatchProgress[]
   history          WatchHistory[]
   myList           MyListItem[]
+  movieAccess      UserMovieAccess[]
+  collectionAccess UserCollectionAccess[]
   passwordResets   PasswordResetToken[]
   emailVerifications EmailVerificationToken[]
 }
@@ -129,6 +132,7 @@ model Movie {
   updatedAt         DateTime         @updatedAt
   assets            VideoAsset[]
   collectionItems   CollectionItem[]
+  userAccess        UserMovieAccess[]
 }
 
 model Series {
@@ -218,8 +222,33 @@ model Collection {
   parent    Collection?       @relation("CollectionHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
   children  Collection[]      @relation("CollectionHierarchy")
   items     CollectionItem[]
+  userAccess UserCollectionAccess[]
 
   @@index([parentId])
+}
+
+model UserMovieAccess {
+  id        String   @id @default(uuid())
+  userId    String
+  movieId   String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  movie     Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, movieId])
+  @@index([movieId])
+}
+
+model UserCollectionAccess {
+  id           String     @id @default(uuid())
+  userId       String
+  collectionId String
+  createdAt    DateTime   @default(now())
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, collectionId])
+  @@index([collectionId])
 }
 
 model CollectionItem {
