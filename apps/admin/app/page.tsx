@@ -260,6 +260,27 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function deleteCollection(collection: RecordItem) {
+    if (!collection.id) return;
+    const confirmed = confirm(`Delete folder "${String(collection.name ?? "Untitled")}"? Videos will not be deleted.`);
+    if (!confirmed) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/collections/${collection.id}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Could not delete folder");
+      }
+      setNotice(`Deleted folder "${String(collection.name ?? "Untitled")}".`);
+      await load("Collections");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not delete folder.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -289,12 +310,12 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Overview" && <Overview metrics={metrics} data={data} />}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
-        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onDeleteCollection={deleteCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
-        {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} />}
+        {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
@@ -372,11 +393,11 @@ function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordI
   return <article className="panel upload editpanel"><div className="panelhead"><div><h2>Edit video</h2><p>{String(movie.title ?? "Untitled")}</p></div><button onClick={onCancel}>Cancel</button></div><form onSubmit={onSubmit}><label>Title<input name="title" required maxLength={160} defaultValue={String(movie.title ?? "")} /></label><label>Synopsis<textarea name="synopsis" rows={4} required defaultValue={String(movie.synopsis ?? "")} /></label><label>Maturity rating<input name="maturityRating" maxLength={20} defaultValue={String(movie.maturityRating ?? "")} /></label><label>Status<select name="status" defaultValue={String(movie.status ?? "DRAFT")}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="ARCHIVED">Archived</option></select></label><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save changes"}</button></form></article>;
 }
 
-function CatalogPanel({ collections, movies, loading, onCreateCollection, onUpdateCollection, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreateCollection: (event: FormEvent<HTMLFormElement>) => void; onUpdateCollection: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
-  return <section className="grid"><CollectionsPanel collections={collections} movies={movies} loading={loading} onCreate={onCreateCollection} onUpdate={onUpdateCollection} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact /></section>;
+function CatalogPanel({ collections, movies, loading, onCreateCollection, onUpdateCollection, onDeleteCollection, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreateCollection: (event: FormEvent<HTMLFormElement>) => void; onUpdateCollection: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDeleteCollection: (collection: RecordItem) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+  return <section className="grid"><CollectionsPanel collections={collections} movies={movies} loading={loading} onCreate={onCreateCollection} onUpdate={onUpdateCollection} onDelete={onDeleteCollection} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact /></section>;
 }
 
-function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreate: (event: FormEvent<HTMLFormElement>) => void; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreate: (event: FormEvent<HTMLFormElement>) => void; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (collection: RecordItem) => void }) {
   return (
     <article className="panel folders">
       <div className="panelhead"><div><h2>Folders / Collections</h2><p>Create Android home sections and organize published videos.</p></div><b>{collections.length} folders</b></div>
@@ -388,17 +409,17 @@ function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate }: 
         <button className="primary" disabled={loading}>Create folder</button>
       </form>
       <div className="folderlist">
-        {collections.map((collection) => <CollectionEditor key={String(collection.id)} collection={collection} movies={movies} loading={loading} onUpdate={onUpdate} />)}
+        {collections.map((collection) => <CollectionEditor key={String(collection.id)} collection={collection} movies={movies} loading={loading} onUpdate={onUpdate} onDelete={onDelete} />)}
       </div>
     </article>
   );
 }
 
-function CollectionEditor({ collection, movies, loading, onUpdate }: { collection: RecordItem; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+function CollectionEditor({ collection, movies, loading, onUpdate, onDelete }: { collection: RecordItem; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (collection: RecordItem) => void }) {
   const selected = collectionMovieIds(collection);
   return (
     <form className="foldercard" onSubmit={(event) => onUpdate(collection, event)}>
-      <div className="panelhead"><div><h3>{String(collection.name ?? "Untitled folder")}</h3><p>{String(collection.slug ?? "")} - {collection.published ? "Visible in Android" : "Draft/hidden"} - {count(collection.items)} videos</p></div><button disabled={loading}>Save folder</button></div>
+      <div className="panelhead"><div><h3>{String(collection.name ?? "Untitled folder")}</h3><p>{String(collection.slug ?? "")} - {collection.published ? "Visible in Android" : "Draft/hidden"} - {count(collection.items)} videos</p></div><div className="rowactions"><button type="button" className="danger" disabled={loading} onClick={() => onDelete(collection)}>Delete</button><button disabled={loading}>Save folder</button></div></div>
       <div className="folderfields">
         <label>Name<input name="name" required maxLength={120} defaultValue={String(collection.name ?? "")} /></label>
         <label>Sort<input name="sortOrder" type="number" defaultValue={Number(collection.sortOrder ?? 0)} /></label>
