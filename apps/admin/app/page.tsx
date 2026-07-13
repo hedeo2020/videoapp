@@ -3,7 +3,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Movies", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -87,7 +87,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [editing, setEditing] = useState<RecordItem | null>(null);
 
   const metrics = useMemo(() => [
-    ["Movies", count(data.movies), "catalog"],
+    ["Videos", count(data.movies), "catalog"],
     ["Series", count(data.series), "episodic"],
     ["Users", count(data.users), "accounts"],
     ["Jobs", jobsTotal(data.processing), "queue"],
@@ -99,7 +99,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     try {
       const next: Record<string, unknown> = { ...data };
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
-      if (["Overview", "Movies", "Uploads", "Collections", "Catalog"].includes(tab)) await get("movies", "/admin/movies");
+      if (["Overview", "Videos", "Uploads", "Collections", "Catalog"].includes(tab)) await get("movies", "/admin/movies");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
@@ -148,7 +148,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       const response = await fetch(`${API}/admin/movies/${id}/publish`, { method: "POST", credentials: "include", headers: csrfHeaders() });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "Publish failed");
-      setNotice("Movie published.");
+      setNotice("Video published.");
       await load(active);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Publish failed.");
@@ -311,7 +311,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onDeleteCollection={deleteCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
-        {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Videos" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
@@ -332,7 +332,7 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
       <section className="metrics">{metrics.map(([label, value, trend]) => <article key={label}><small>{label}</small><strong>{value}</strong><em>{trend}</em></article>)}</section>
       <section className="grid">
         <JsonPanel title="Queue snapshot" value={data.processing} />
-        <JsonPanel title="Recent catalog" value={{ movies: count(data.movies), collections: count(data.collections), series: count(data.series) }} />
+        <JsonPanel title="Recent catalog" value={{ videos: count(data.movies), collections: count(data.collections), series: count(data.series) }} />
       </section>
     </>
   );
@@ -344,7 +344,7 @@ function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, u
   return (
     <section className="grid">
       <article className="panel upload">
-        <div className="panelhead"><div><h2>Upload title</h2><p>Create a draft movie and store the source file.</p></div><b>Draft</b></div>
+        <div className="panelhead"><div><h2>Upload video</h2><p>Create a draft video and store the source file.</p></div><b>Draft</b></div>
         <form onSubmit={onUpload}>
           <label>Title<input name="title" required maxLength={160} /></label>
           <label>Synopsis<textarea name="synopsis" rows={4} /></label>
@@ -363,7 +363,7 @@ function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, u
 function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact = false }: { movies: RecordItem[]; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void; compact?: boolean }) {
   return (
     <article className="panel">
-      <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Movies"}</h2><p>{movies.length} movie records</p></div></div>
+      <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Videos"}</h2><p>{movies.length} video records</p></div></div>
       <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button onClick={() => onEdit(movie)}>Edit</button><button className="danger" onClick={() => onDelete(movie)}>Delete</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
     </article>
   );
@@ -528,9 +528,9 @@ function panelSubtitle(tab: Tab) {
   const labels: Record<Tab, string> = {
     Overview: "Platform snapshot and quick actions.",
     Catalog: "Published rails and title inventory.",
-    Movies: "Review and publish uploaded movies.",
+    Videos: "Review and publish uploaded videos.",
     Series: "Manage episodic catalog records.",
-    Uploads: "Upload source files and create draft movies.",
+    Uploads: "Upload source files and create draft videos.",
     Processing: "Monitor encoding and packaging jobs.",
     Collections: "Browse configured home-screen rails.",
     Users: "Review viewer and operator accounts.",
