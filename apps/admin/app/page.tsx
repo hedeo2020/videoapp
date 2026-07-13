@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -99,8 +99,9 @@ function Dashboard({ admin }: { admin: Admin }) {
     try {
       const next: Record<string, unknown> = { ...data };
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
-      if (["Overview", "Videos", "Uploads", "Collections", "Catalog", "Users"].includes(tab)) await get("movies", "/admin/movies");
+      if (["Overview", "Videos", "Uploads", "Collections", "Catalog", "Users", "Video Editor"].includes(tab)) await get("movies", "/admin/movies");
       if (tab === "File Manager") await get("files", "/admin/files");
+      if (tab === "Video Editor") await get("editorJobs", "/admin/editor/jobs");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog", "Users"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
@@ -132,6 +133,13 @@ function Dashboard({ admin }: { admin: Admin }) {
     };
     const timer = setInterval(() => void refreshSystem(), 1000);
     return () => { cancelled = true; clearInterval(timer); };
+  }, [active]);
+  useEffect(() => {
+    if (active !== "Video Editor") return;
+    const timer = setInterval(() => {
+      void apiGet("/admin/editor/jobs").then((editorJobs) => setData((current) => ({ ...current, editorJobs }))).catch(() => undefined);
+    }, 1500);
+    return () => clearInterval(timer);
   }, [active]);
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
@@ -168,6 +176,35 @@ function Dashboard({ admin }: { admin: Admin }) {
       await load(active);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Publish failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createTrimJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/editor/jobs/trim`, {
+        method: "POST",
+        credentials: "include",
+        headers: { ...csrfHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({
+          assetId: data.get("assetId"),
+          title: optionalFormString(data, "title"),
+          startSeconds: Number(data.get("startSeconds") ?? 0),
+          endSeconds: Number(data.get("endSeconds") ?? 0),
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Trim job failed");
+      setNotice("Video trim job started. The edited clip will appear as a new draft when ready.");
+      await load("Video Editor");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Trim job failed.");
     } finally {
       setLoading(false);
     }
@@ -391,6 +428,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onDeleteCollection={deleteCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Videos" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Video Editor" && <VideoEditorPanel movies={asArray(data.movies)} jobs={asArray(data.editorJobs)} loading={loading} onSubmit={createTrimJob} />}
         {active === "File Manager" && <FileManagerPanel files={asArray(data.files)} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
@@ -478,6 +516,32 @@ function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact =
       <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Videos"}</h2><p>{movies.length} video records</p></div></div>
       <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button onClick={() => onEdit(movie)}>Edit</button><button className="danger" onClick={() => onDelete(movie)}>Delete</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
     </article>
+  );
+}
+
+function VideoEditorPanel({ movies, jobs, loading, onSubmit }: { movies: RecordItem[]; jobs: RecordItem[]; loading: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  const assets = movies.flatMap((movie) => asArray(movie.assets).map((asset) => ({ movie, asset })));
+  return (
+    <section className="grid editorgrid">
+      <article className="panel upload editorpanel">
+        <div className="panelhead"><div><h2>Trim video</h2><p>Cut a basic start/end clip and save it as a new draft video.</p></div><b>Safe edit</b></div>
+        <form onSubmit={onSubmit}>
+          <label>Source video<select name="assetId" required>{assets.map(({ movie, asset }) => <option key={String(asset.id)} value={String(asset.id)}>{String(movie.title ?? "Untitled")} - {formatRuntime(asset.durationSeconds)} - {String(asset.state ?? "UNKNOWN")}</option>)}</select></label>
+          <label>New draft title<input name="title" placeholder="Leave blank to use original title + edited" maxLength={160} /></label>
+          <div className="folderfields">
+            <label>Start seconds<input name="startSeconds" type="number" min="0" step="0.1" defaultValue="0" required /></label>
+            <label>End seconds<input name="endSeconds" type="number" min="0.1" step="0.1" placeholder="Example: 120" required /></label>
+          </div>
+          <small>This creates a new MP4 draft and does not overwrite the original upload.</small>
+          <button className="primary" disabled={loading || !assets.length}>{loading ? "Starting..." : "Start trim job"}</button>
+        </form>
+      </article>
+      <article className="panel editorjobs">
+        <div className="panelhead"><div><h2>Editor jobs</h2><p>{jobs.length} recent trim jobs</p></div></div>
+        <div className="rows">{jobs.map((job) => <div className="row editorjob" key={String(job.id)}><div><b>{String(job.title ?? "Edited draft")}</b><small>{String(job.phase ?? "Queued")} - {String(job.status ?? "QUEUED")}</small>{Boolean(job.error) && <small className="errorline">{String(job.error)}</small>}</div><div><strong>{percent(job.progress)}%</strong><div className="statusbar"><i style={{ width: `${percent(job.progress)}%` }} /></div>{Boolean(job.resultMovieId) && <small>Draft ready</small>}</div></div>)}</div>
+        {!jobs.length && <div className="formnote">No editor jobs yet. Start by trimming one uploaded video.</div>}
+      </article>
+    </section>
   );
 }
 
@@ -805,6 +869,7 @@ function panelSubtitle(tab: Tab) {
     Overview: "Platform snapshot and quick actions.",
     Catalog: "Published rails and title inventory.",
     Videos: "Review and publish uploaded videos.",
+    "Video Editor": "Trim source videos and save edited clips as safe draft copies.",
     "File Manager": "Track uploaded files, sizes, formats, and storage details.",
     Series: "Manage episodic catalog records.",
     Uploads: "Upload source files and create draft videos.",
