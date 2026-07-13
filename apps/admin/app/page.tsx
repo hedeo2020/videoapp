@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -130,6 +130,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "Notifications") await get("users", "/admin/users");
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
       if (["Playback sessions", "Watermark Trace"].includes(tab)) await get("playback", "/admin/playback-sessions");
+      if (tab === "Backup & Restore") await get("backups", "/admin/backups");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
       if (tab === "Security") await get("security", "/admin/security-events");
       if (tab === "Settings") await get("settings", "/admin/settings");
@@ -613,6 +614,43 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function createBackup() {
+    setLoading(true);
+    setNotice("Creating backup. Large video libraries can take a while...");
+    try {
+      const response = await fetch(`${API}/admin/backups`, { method: "POST", credentials: "include", headers: csrfHeaders() });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Backup failed");
+      setNotice(`Backup ready: ${payload.name}`);
+      await load("Backup & Restore");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Backup failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function restoreBackup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!confirm("Restore will replace users, catalog, folders, chats, notifications, watch data, and media files with the backup contents. Continue?")) return;
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setLoading(true);
+    setNotice("Restoring backup. Do not close this page...");
+    try {
+      const response = await fetch(`${API}/admin/backups/restore`, { method: "POST", credentials: "include", headers: csrfHeaders(), body: formData });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Restore failed");
+      form.reset();
+      setNotice(`Restore complete. Media files restored: ${payload.mediaFiles ?? 0}`);
+      await load("Backup & Restore");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Restore failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -659,6 +697,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Watermark Trace" && <WatermarkTracePanel rows={asArray(data.playback)} />}
+        {active === "Backup & Restore" && <BackupPanel backups={data.backups as RecordItem | undefined} loading={loading} onCreate={createBackup} onRestore={restoreBackup} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
         {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} />}
@@ -1246,6 +1285,32 @@ function WatermarkTracePanel({ rows }: { rows: RecordItem[] }) {
   );
 }
 
+function BackupPanel({ backups, loading, onCreate, onRestore }: { backups?: RecordItem; loading: boolean; onCreate: () => void; onRestore: (event: FormEvent<HTMLFormElement>) => void }) {
+  const items = asArray(backups?.items);
+  return (
+    <section className="grid backupgrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Create portable backup</h2><p>Includes users, folders, catalog, access rules, chats, notifications, watch data, and media files.</p></div><b>{items.length} backups</b></div>
+        <div className="formnote">Backup files are URL/port safe. Media is stored by relative storage path, so it can restore on another server using a different domain.</div>
+        <button className="primary" disabled={loading} onClick={onCreate}>{loading ? "Working..." : "Create downloadable backup"}</button>
+      </article>
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Restore backup</h2><p>Upload a SecureStream backup .tar from this or another server.</p></div><b>Destructive</b></div>
+        <form onSubmit={onRestore}>
+          <label>Backup .tar file<input name="file" type="file" accept=".tar,application/x-tar" required /></label>
+          <div className="formnote">Restore replaces the current platform data. Make sure this new server has persistent storage mounted before restoring.</div>
+          <button className="danger" disabled={loading}>{loading ? "Restoring..." : "Restore backup"}</button>
+        </form>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Available downloads</h2><p>Stored under {String(backups?.storageRoot ?? "your media storage")}/backups.</p></div></div>
+        <div className="rows">{items.map((backup) => <div className="row" key={String(backup.name)}><div><b>{String(backup.name)}</b><small>{formatBytes(backup.sizeBytes)} - {formatDateTime(backup.createdAt)}</small></div><a className="download" href={`${API}/admin/backups/${encodeURIComponent(String(backup.name))}/download`}>Download</a></div>)}</div>
+        {!items.length && <div className="formnote">No backups yet. Create one first.</div>}
+      </article>
+    </section>
+  );
+}
+
 function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }) {
   return <article className="panel tablewrap"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? index)}>{columns.map((column) => <td key={column}>{format(row[column])}</td>)}</tr>)}</tbody></table></article>;
 }
@@ -1410,6 +1475,7 @@ function panelSubtitle(tab: Tab) {
     "API Tokens": "Create and revoke automation tokens for n8n workflows.",
     "Playback sessions": "Inspect recent stream grants.",
     "Watermark Trace": "Paste a playback watermark and identify the user/session.",
+    "Backup & Restore": "Download or restore a portable server migration backup.",
     "Audit logs": "Trace privileged admin actions.",
     Security: "Review security events.",
     Settings: "Inspect runtime configuration.",
