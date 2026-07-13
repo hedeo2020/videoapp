@@ -27,6 +27,19 @@ export default function App() {
   return admin ? <Dashboard admin={admin} /> : <Login onLogin={setAdmin} />;
 }
 
+function SecureLogo() {
+  return (
+    <span className="lockmark" aria-hidden="true">
+      <svg viewBox="0 0 64 64" role="img">
+        <rect x="14" y="27" width="36" height="27" rx="5" />
+        <path d="M20 28V20c0-8 5-14 12-14s12 6 12 14v8h-6V20c0-5-3-9-6-9s-6 4-6 9v8z" />
+        <circle cx="32" cy="40" r="4" className="lockhole" />
+        <path d="M32 44v6" className="lockslot" />
+      </svg>
+    </span>
+  );
+}
+
 function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -59,7 +72,7 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
   return (
     <main className="login">
       <section>
-        <div className="brand"><i>{">"}</i> SecureStream</div>
+        <div className="brand"><SecureLogo /> SecureStream</div>
         <small>ADMINISTRATION CONSOLE</small>
         <h1>Welcome back</h1>
         <p>Sign in with your administrator account.</p>
@@ -78,6 +91,7 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
 function Dashboard({ admin }: { admin: Admin }) {
   const [active, setActive] = useState<Tab>("Overview");
   const [data, setData] = useState<Record<string, unknown>>({});
+  const [sidebarHidden, setSidebarHidden] = useState(false);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [conversionProgress, setConversionProgress] = useState<number | null>(null);
@@ -93,6 +107,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     ["Users", count(data.users), "accounts"],
     ["Jobs", jobsTotal(data.processing), "queue"],
   ], [data]);
+  const unreadMessages = useMemo(() => asArray(data.conversations).reduce((total, conversation) => total + Number(conversation.unreadCount ?? 0), 0), [data.conversations]);
 
   async function load(tab = active) {
     setLoading(true);
@@ -155,6 +170,20 @@ function Dashboard({ admin }: { admin: Admin }) {
     }, 2500);
     return () => clearInterval(timer);
   }, [active]);
+  useEffect(() => {
+    let cancelled = false;
+    const refreshConversations = async () => {
+      try {
+        const conversations = await apiGet("/admin/conversations");
+        if (!cancelled) setData((current) => ({ ...current, conversations }));
+      } catch {
+        // Keep the last unread badge if one poll misses.
+      }
+    };
+    void refreshConversations();
+    const timer = setInterval(() => void refreshConversations(), 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, []);
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -592,15 +621,18 @@ function Dashboard({ admin }: { admin: Admin }) {
   }
 
   return (
-    <div className="shell">
+    <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
       <aside>
-        <div className="brand"><i>{">"}</i> SecureStream</div>
-        <nav>{nav.map((item) => <button className={item === active ? "active" : ""} key={item} onClick={() => setActive(item)}>{item}</button>)}</nav>
+        <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={() => setSidebarHidden(true)} title="Hide admin panel">‹</button></div>
+        <nav>{nav.map((item) => {
+          const badge = item === "Messages" ? unreadMessages : 0;
+          return <button className={item === active ? "active" : ""} key={item} onClick={() => setActive(item)}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
+        })}</nav>
         <div className="operator"><span>{admin.displayName.slice(0, 2).toUpperCase()}</span><div><b>{admin.displayName}</b><small>{admin.role.replace("_", " ").toLowerCase()}</small></div></div>
       </aside>
       <main>
         <header>
-          <div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>
+          <div className="headtitle"><button className="menu-toggle" onClick={() => setSidebarHidden((hidden) => !hidden)}>{sidebarHidden ? "☰ Show panel" : "☰ Hide panel"}</button><div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>{unreadMessages > 0 && <span className="messagepill">{unreadMessages} unread message{unreadMessages === 1 ? "" : "s"}</span>}</div>
           <div className="actions"><button onClick={() => load(active)} disabled={loading}>{loading ? "Refreshing..." : "Refresh"}</button><button className="primary" onClick={() => setActive("Uploads")}>+ Upload</button></div>
         </header>
         {notice && <div className="formnote workspace-note">{notice}</div>}
