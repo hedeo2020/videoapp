@@ -24,7 +24,7 @@ The Android app uses `http://10.0.2.2:4000` from an emulator. Build it on a deve
 
 Original assets are private, playback grants are short-lived and scoped, access is server-authorized, sensitive logs are redacted, and protected Android windows use `FLAG_SECURE`. Production protected titles require a legitimate Widevine DRM provider. Development HLS is non-DRM and is not a substitute. Rooted devices and external cameras can still capture video; see [the threat model](docs/THREAT_MODEL.md).
 
-Architecture and milestones are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). OCI/Coolify operations are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The complete portable install/migration guide is in [docs/PORTABLE_PACKAGE.md](docs/PORTABLE_PACKAGE.md).
+Architecture and milestones are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). OCI/Coolify operations are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The complete portable install/migration guide is in [docs/PORTABLE_PACKAGE.md](docs/PORTABLE_PACKAGE.md), and the step-by-step Coolify guide is in [docs/COOLIFY_INSTALLATION.md](docs/COOLIFY_INSTALLATION.md).
 
 ## Identity API
 

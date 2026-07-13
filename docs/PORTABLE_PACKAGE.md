@@ -110,6 +110,12 @@ Then run the same admin command once and remove those bootstrap variables.
 
 Use Docker Compose mode for the full package.
 
+For the detailed click-by-click Coolify setup, use:
+
+```text
+docs/COOLIFY_INSTALLATION.md
+```
+
 Recommended service domains:
 
 - API: `https://api.yourdomain.com` → internal port `4000`
