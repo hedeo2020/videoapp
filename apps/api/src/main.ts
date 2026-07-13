@@ -36,6 +36,7 @@ type AuthRequest=FastifyRequest & {auth:Auth};
 const ipHash=(req:FastifyRequest)=>createHash("sha256").update(req.ip).digest("hex");
 const sessionContext=(req:FastifyRequest,deviceId:string)=>({deviceId,userAgent:req.headers["user-agent"],ipHash:ipHash(req)});
 const sendError=(reply:FastifyReply,requestId:string,status:number,code:string,message:string)=>reply.code(status).send({error:{code,message,requestId}});
+const sendAccountStatus=(reply:FastifyReply,requestId:string,status:number,code:string,accountStatus:string,adminMessage:string)=>reply.code(status).send({error:{code,message:adminMessage,requestId,accountStatus,adminMessage},accountStatus,adminMessage});
 const slugify=(input:string)=>input.toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"").slice(0,80);
 const contentTypeFor=(key:string)=>{const lower=key.toLowerCase();return lower.endsWith(".mp4")?"video/mp4":lower.endsWith(".webm")?"video/webm":lower.endsWith(".mov")?"video/quicktime":lower.endsWith(".mkv")?"video/x-matroska":lower.endsWith(".m3u8")?"application/vnd.apple.mpegurl":lower.endsWith(".jpg")||lower.endsWith(".jpeg")?"image/jpeg":lower.endsWith(".png")?"image/png":"application/octet-stream"};
 const storagePathFor=(key:string)=>{const root=path.resolve(storageRoot);const filePath=path.resolve(root,key);return filePath.startsWith(root+path.sep)?filePath:null};
@@ -120,7 +121,8 @@ app.post("/api/v1/auth/register",{config:{rateLimit:{max:5,timeWindow:"15 minute
 app.post("/api/v1/auth/login",{config:{rateLimit:{max:8,timeWindow:"15 minutes"}}},async(req,reply)=>{
   const body=z.object({email:z.string().email(),password:z.string(),deviceId:z.string().min(8)}).parse(req.body);
   const user=await verifyPasswordAndTrack(prisma,body.email,body.password);
-  if(!user||user.status!=="ACTIVE"){await prisma.securityEvent.create({data:{userId:user?.id,kind:"LOGIN_FAILED",severity:"MEDIUM",metadata:{ipHash:ipHash(req)}}});return sendError(reply,req.id,401,"INVALID_CREDENTIALS","Email or password is incorrect")}
+  if(!user){const existing=await prisma.user.findUnique({where:{email:body.email.toLowerCase()},select:{id:true}});await prisma.securityEvent.create({data:{userId:existing?.id,kind:"LOGIN_FAILED",severity:"MEDIUM",metadata:{ipHash:ipHash(req)}}});return existing?sendError(reply,req.id,401,"INVALID_CREDENTIALS","Email or password is incorrect"):sendAccountStatus(reply,req.id,404,"ACCOUNT_NOT_FOUND","DELETED","This account no longer exists. Please contact the administrator.")}
+  if(user.status!=="ACTIVE"){await prisma.securityEvent.create({data:{userId:user.id,kind:"LOGIN_BLOCKED",severity:"MEDIUM",metadata:{ipHash:ipHash(req),status:user.status}}});const message=user.status==="SUSPENDED"?"Your account is suspended. Please contact the administrator.":"Your account is disabled. Please contact the administrator.";return sendAccountStatus(reply,req.id,403,"ACCOUNT_INACTIVE",user.status,message)}
   const tokens=await issueSession(prisma,user,sessionContext(req,body.deviceId));
   await prisma.securityEvent.create({data:{userId:user.id,kind:"LOGIN_SUCCEEDED",severity:"INFO"}});
   return {...tokens,user:publicUser(user)};
