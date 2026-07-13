@@ -1148,7 +1148,7 @@ function NotificationsPanel({ notifications, users, loading, onSend }: { notific
         <form onSubmit={onSend}>
           <label>Title<input name="title" required maxLength={120} placeholder="New videos added" /></label>
           <label>Message<textarea name="body" rows={4} required maxLength={2000} placeholder="Tell users what changed..." /></label>
-          <label className="toggle"><input name="allUsers" type="checkbox" defaultChecked /> Send to all active viewers</label>
+          <label className="toggle"><input name="allUsers" type="checkbox" /> Send to all active viewers</label>
           <div className="accesspicker"><div><b>Or choose specific users</b><p>If “all active viewers” is unchecked, selected users will receive it.</p><div className="checkgrid">{viewers.map((user) => <label key={String(user.id)}><input name="userIds" type="checkbox" value={String(user.id)} /> <span>{String(user.email ?? user.displayName)}</span></label>)}</div></div></div>
           <button className="primary" disabled={loading}>Send notification</button>
         </form>
@@ -1312,7 +1312,7 @@ function formatLoad(value: unknown) { return Array.isArray(value) ? value.map((i
 function cpuLoadPercent(cpu: RecordItem) { const cores = Number(cpu.cores ?? 1) || 1; const firstLoad = Array.isArray(cpu.loadAverage) ? Number(cpu.loadAverage[0] ?? 0) : 0; return Math.min(100, Math.round((firstLoad / cores) * 100)); }
 function formatDuration(seconds: number) { const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); const minutes = Math.floor((seconds % 3600) / 60); return `${days ? `${days}d ` : ""}${hours}h ${minutes}m`; }
 function formatDate(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(); }
-function formatDateTime(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString(); }
+function formatDateTime(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("en-PH", { timeZone: "Asia/Manila" }); }
 function fileNameFromKey(value: unknown) { return String(value ?? "").split(/[\\/]/).pop() || "Unknown file"; }
 function fileSearchText(file: RecordItem) { return [file.title, file.sourceFileName, file.sourceStorageKey, file.previewFileName, file.format, file.previewFormat, file.state, file.uploadStatus, file.ownerStatus].map((value) => String(value ?? "").toLowerCase()).join(" "); }
 function formatRuntime(value: unknown) { const seconds = Number(value ?? 0); if (!Number.isFinite(seconds) || seconds <= 0) return "Unknown"; const minutes = Math.floor(seconds / 60); const remaining = Math.round(seconds % 60); return minutes ? `${minutes}m ${remaining}s` : `${remaining}s`; }
