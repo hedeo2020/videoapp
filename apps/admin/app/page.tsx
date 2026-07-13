@@ -118,6 +118,20 @@ function Dashboard({ admin }: { admin: Admin }) {
   }
 
   useEffect(() => { void load(active); }, [active]);
+  useEffect(() => {
+    if (active !== "Overview") return;
+    let cancelled = false;
+    const refreshSystem = async () => {
+      try {
+        const system = await apiGet("/admin/system-status");
+        if (!cancelled) setData((current) => ({ ...current, system }));
+      } catch {
+        // Keep the existing snapshot visible if one realtime poll misses.
+      }
+    };
+    const timer = setInterval(() => void refreshSystem(), 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [active]);
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -353,7 +367,7 @@ function SystemStatusPanel({ system }: { system?: RecordItem }) {
   const interfaces = asArray(network.interfaces);
   return (
     <article className="panel systempanel">
-      <div className="panelhead"><div><h2>System status</h2><p>Live API server health, storage, and network snapshot.</p></div><b>{system?.checkedAt ? formatDate(system.checkedAt) : "Waiting"}</b></div>
+      <div className="panelhead"><div><h2>System status</h2><p>Live API server health, storage, and network snapshot.</p></div><div className="liveclock"><small>Live every second</small><b>{system?.checkedAt ? formatDate(system.checkedAt) : "Waiting"}</b></div></div>
       <div className="systemgrid">
         <StatusGauge label="Memory" value={percent(memory.usedPercent)} detail={`${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}`} />
         <StatusGauge label="Storage" value={percent(storage.usedPercent)} detail={`${formatBytes(storage.usedBytes)} / ${formatBytes(storage.totalBytes)}`} note={String(storage.path ?? "")} />
