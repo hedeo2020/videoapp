@@ -273,6 +273,29 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function updateSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/settings`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { ...csrfHeaders(), "content-type": "application/json" },
+        body: JSON.stringify({ deleteOriginalAfterPreview: formData.get("deleteOriginalAfterPreview") === "on" }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Settings update failed");
+      setData((current) => ({ ...current, settings: payload }));
+      setNotice("Settings saved.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Settings update failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function updateMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editing?.id) return;
@@ -502,7 +525,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
-        {active === "Settings" && <JsonPanel title="Runtime settings" value={data.settings} />}
+        {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} />}
       </main>
     </div>
   );
@@ -983,6 +1006,25 @@ function PlaybackPanel({ rows }: { rows: RecordItem[] }) {
 
 function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }) {
   return <article className="panel tablewrap"><table><thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{rows.map((row, index) => <tr key={String(row.id ?? index)}>{columns.map((column) => <td key={column}>{format(row[column])}</td>)}</tr>)}</tbody></table></article>;
+}
+
+function SettingsPanel({ settings, loading, onSave }: { settings?: RecordItem; loading: boolean; onSave: (event: FormEvent<HTMLFormElement>) => void }) {
+  return (
+    <section className="grid">
+      <article className="panel">
+        <div className="panelhead"><div><h2>Storage behavior</h2><p>Control how uploaded videos are kept after the playable MP4 preview is ready.</p></div></div>
+        <form className="stackform" onSubmit={onSave}>
+          <label className="checkrow">
+            <input name="deleteOriginalAfterPreview" type="checkbox" defaultChecked={Boolean(settings?.deleteOriginalAfterPreview)} />
+            <span><b>Delete original after MP4 preview is ready</b><small>New uploads will keep only the browser/app playable MP4 after conversion succeeds. If conversion fails, the original stays.</small></span>
+          </label>
+          <div className="formnote">Use this to save storage. Leave it off if you still want to keep original MKV/MOV/source files for future re-editing.</div>
+          <button className="primary" disabled={loading}>{loading ? "Saving..." : "Save settings"}</button>
+        </form>
+      </article>
+      <JsonPanel title="Runtime settings" value={settings} />
+    </section>
+  );
 }
 
 function JsonPanel({ title, value }: { title: string; value: unknown }) {
