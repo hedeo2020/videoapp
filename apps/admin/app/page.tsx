@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -100,6 +100,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       const next: Record<string, unknown> = { ...data };
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
       if (["Overview", "Videos", "Uploads", "Collections", "Catalog", "Users"].includes(tab)) await get("movies", "/admin/movies");
+      if (tab === "File Manager") await get("files", "/admin/files");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog", "Users"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
@@ -390,6 +391,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
         {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onDeleteCollection={deleteCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Videos" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "File Manager" && <FileManagerPanel files={asArray(data.files)} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
@@ -475,6 +477,31 @@ function MoviesPanel({ movies, onPublish, onPreview, onEdit, onDelete, compact =
     <article className="panel">
       <div className="panelhead"><div><h2>{compact ? "Recent uploads" : "Videos"}</h2><p>{movies.length} video records</p></div></div>
       <div className="rows">{movies.map((movie) => <div className="row" key={String(movie.id)}><div><b>{String(movie.title ?? "Untitled")}</b><small>{String(movie.status ?? "DRAFT")} - {count(movie.assets)} assets</small></div><div className="rowactions"><button disabled={!firstAsset(movie)} onClick={() => onPreview(movie)}>Check video</button><button onClick={() => onEdit(movie)}>Edit</button><button className="danger" onClick={() => onDelete(movie)}>Delete</button><button disabled={movie.status === "PUBLISHED"} onClick={() => onPublish(String(movie.id))}>Publish</button></div></div>)}</div>
+    </article>
+  );
+}
+
+function FileManagerPanel({ files }: { files: RecordItem[] }) {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => files.filter((file) => fileSearchText(file).includes(query.trim().toLowerCase())), [files, query]);
+  const totalBytes = filtered.reduce((sum, file) => sum + Number(file.sizeBytes ?? 0), 0);
+  const formats = new Set(filtered.map((file) => String(file.format ?? "UNKNOWN")));
+  return (
+    <article className="panel filemanager">
+      <div className="panelhead"><div><h2>File manager</h2><p>Track uploaded source files, previews, sizes, formats, and linked videos.</p></div><b>{filtered.length} files</b></div>
+      <div className="filesummary">
+        <div><small>Total size</small><strong>{formatBytes(totalBytes)}</strong></div>
+        <div><small>Formats</small><strong>{formats.size}</strong></div>
+        <div><small>Ready assets</small><strong>{filtered.filter((file) => file.state === "READY").length}</strong></div>
+      </div>
+      <label className="filesearch">Search files<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, format, status, or video title" /></label>
+      <div className="tablewrap">
+        <table>
+          <thead><tr><th>File</th><th>Video</th><th>Format</th><th>Size</th><th>Status</th><th>Duration</th><th>Updated</th></tr></thead>
+          <tbody>{filtered.map((file) => <tr key={String(file.id)}><td><b>{String(file.sourceFileName ?? fileNameFromKey(file.sourceStorageKey))}</b><small>{String(file.sourceStorageKey ?? "")}</small>{Boolean(file.previewFileName) && <small>Preview: {String(file.previewFileName)}</small>}</td><td>{String(file.title ?? "Unattached")}<small>{String(file.ownerType ?? "Asset")} {Boolean(file.ownerStatus) ? `- ${String(file.ownerStatus)}` : ""}</small></td><td><span className="filepill">{String(file.format ?? "UNKNOWN")}</span>{Boolean(file.previewFormat) && <small>Preview {String(file.previewFormat)}</small>}</td><td>{formatBytes(file.sizeBytes ?? file.expectedBytes)}</td><td>{String(file.state ?? "UNKNOWN")}<small>{Boolean(file.uploadStatus) ? `Upload ${String(file.uploadStatus).toLowerCase()}` : "No upload row"}</small></td><td>{formatRuntime(file.durationSeconds)}</td><td>{formatDateTime(file.updatedAt)}</td></tr>)}</tbody>
+        </table>
+      </div>
+      {!filtered.length && <div className="formnote">No files found. Upload a video first or clear the search box.</div>}
     </article>
   );
 }
@@ -769,11 +796,16 @@ function formatLoad(value: unknown) { return Array.isArray(value) ? value.map((i
 function cpuLoadPercent(cpu: RecordItem) { const cores = Number(cpu.cores ?? 1) || 1; const firstLoad = Array.isArray(cpu.loadAverage) ? Number(cpu.loadAverage[0] ?? 0) : 0; return Math.min(100, Math.round((firstLoad / cores) * 100)); }
 function formatDuration(seconds: number) { const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); const minutes = Math.floor((seconds % 3600) / 60); return `${days ? `${days}d ` : ""}${hours}h ${minutes}m`; }
 function formatDate(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(); }
+function formatDateTime(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString(); }
+function fileNameFromKey(value: unknown) { return String(value ?? "").split(/[\\/]/).pop() || "Unknown file"; }
+function fileSearchText(file: RecordItem) { return [file.title, file.sourceFileName, file.sourceStorageKey, file.previewFileName, file.format, file.previewFormat, file.state, file.uploadStatus, file.ownerStatus].map((value) => String(value ?? "").toLowerCase()).join(" "); }
+function formatRuntime(value: unknown) { const seconds = Number(value ?? 0); if (!Number.isFinite(seconds) || seconds <= 0) return "Unknown"; const minutes = Math.floor(seconds / 60); const remaining = Math.round(seconds % 60); return minutes ? `${minutes}m ${remaining}s` : `${remaining}s`; }
 function panelSubtitle(tab: Tab) {
   const labels: Record<Tab, string> = {
     Overview: "Platform snapshot and quick actions.",
     Catalog: "Published rails and title inventory.",
     Videos: "Review and publish uploaded videos.",
+    "File Manager": "Track uploaded files, sizes, formats, and storage details.",
     Series: "Manage episodic catalog records.",
     Uploads: "Upload source files and create draft videos.",
     Processing: "Monitor encoding and packaging jobs.",
