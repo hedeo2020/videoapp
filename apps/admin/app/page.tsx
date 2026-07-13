@@ -110,6 +110,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "Overview") await get("cleanup", "/admin/storage-cleanup");
       if (tab === "Users") await get("users", "/admin/users");
       if (tab === "Messages") await get("conversations", "/admin/conversations");
+      if (tab === "Messages") await get("users", "/admin/users");
       if (tab === "Notifications") await get("notifications", "/admin/notifications");
       if (tab === "Notifications") await get("users", "/admin/users");
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
@@ -145,6 +146,13 @@ function Dashboard({ admin }: { admin: Admin }) {
     const timer = setInterval(() => {
       void apiGet("/admin/editor/jobs").then((editorJobs) => setData((current) => ({ ...current, editorJobs }))).catch(() => undefined);
     }, 1500);
+    return () => clearInterval(timer);
+  }, [active]);
+  useEffect(() => {
+    if (active !== "Messages") return;
+    const timer = setInterval(() => {
+      void apiGet("/admin/conversations").then((conversations) => setData((current) => ({ ...current, conversations }))).catch(() => undefined);
+    }, 2500);
     return () => clearInterval(timer);
   }, [active]);
 
@@ -527,6 +535,29 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function startAdminConversation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const userId = String(formData.get("userId") ?? "");
+    const body = String(formData.get("body") ?? "").trim();
+    if (!userId || !body) return setNotice("Choose a user and type a message.");
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/conversations`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify({ userId, body }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Could not start chat");
+      form.reset();
+      setNotice("Chat started.");
+      await load("Messages");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not start chat.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function sendNotification(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -585,7 +616,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
         {active === "Users" && <UsersPanel users={asArray(data.users)} movies={asArray(data.movies)} collections={asArray(data.collections)} loading={loading} onCreate={createUser} onUpdate={updateUser} onDelete={deleteUser} />}
-        {active === "Messages" && <MessagesPanel conversations={asArray(data.conversations)} loading={loading} onReply={sendAdminMessage} />}
+        {active === "Messages" && <MessagesPanel conversations={asArray(data.conversations)} users={asArray(data.users)} loading={loading} onStart={startAdminConversation} onReply={sendAdminMessage} />}
         {active === "Notifications" && <NotificationsPanel notifications={asArray(data.notifications)} users={asArray(data.users)} loading={loading} onSend={sendNotification} />}
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
@@ -1062,24 +1093,36 @@ function AccessPicker({ movies, collections, selectedMovieIds = [], selectedColl
   );
 }
 
-function MessagesPanel({ conversations, loading, onReply }: { conversations: RecordItem[]; loading: boolean; onReply: (conversation: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+function MessagesPanel({ conversations, users, loading, onStart, onReply }: { conversations: RecordItem[]; users: RecordItem[]; loading: boolean; onStart: (event: FormEvent<HTMLFormElement>) => void; onReply: (conversation: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+  const viewers = users.filter((user) => user.role === "VIEWER" && user.status === "ACTIVE");
   return (
-    <article className="panel userspanel">
-      <div className="panelhead"><div><h2>User messages</h2><p>Reply to viewer support messages from the Android app.</p></div><b>{conversations.length} chats</b></div>
-      <div className="userlist">{conversations.map((conversation) => {
-        const user = conversation.user as RecordItem | undefined;
-        const last = conversation.lastMessage as RecordItem | undefined;
-        return (
-          <form className="foldercard" key={String(conversation.id)} onSubmit={(event) => onReply(conversation, event)}>
-            <div className="panelhead"><div><h3>{String(user?.displayName ?? "Viewer")}</h3><p>{String(user?.email ?? "")} - {Number(conversation.unreadCount ?? 0)} unread</p></div><small>{formatDateTime(conversation.updatedAt)}</small></div>
-            <div className="formnote">{last ? `${String((last.sender as RecordItem | undefined)?.displayName ?? "User")}: ${String(last.body ?? "")}` : "No messages yet."}</div>
-            <label>Reply<textarea name="body" rows={3} required maxLength={5000} placeholder="Type your reply..." /></label>
-            <button className="primary" disabled={loading}>Send reply</button>
-          </form>
-        );
-      })}</div>
-      {!conversations.length && <div className="formnote">No user conversations yet.</div>}
-    </article>
+    <section className="grid usersgrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Start chat</h2><p>Message a viewer first, even before they contact you.</p></div><b>{viewers.length} viewers</b></div>
+        <form onSubmit={onStart}>
+          <label>User<select name="userId" required defaultValue=""><option value="">Choose user</option>{viewers.map((user) => <option key={String(user.id)} value={String(user.id)}>{String(user.email ?? user.displayName)}</option>)}</select></label>
+          <label>Message<textarea name="body" rows={4} required maxLength={5000} placeholder="Type your first message..." /></label>
+          <button className="primary" disabled={loading}>Start chat</button>
+        </form>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>User messages</h2><p>Auto-refreshes every few seconds while this panel is open.</p></div><b>{conversations.length} chats</b></div>
+        <div className="userlist">{conversations.map((conversation) => {
+          const user = conversation.user as RecordItem | undefined;
+          const last = conversation.lastMessage as RecordItem | undefined;
+          const sender = last?.sender as RecordItem | undefined;
+          return (
+            <form className="foldercard" key={String(conversation.id)} onSubmit={(event) => onReply(conversation, event)}>
+              <div className="panelhead"><div><h3>{String(user?.displayName ?? "Viewer")}</h3><p>{String(user?.email ?? "")} - {Number(conversation.unreadCount ?? 0)} unread</p></div><small>{formatDateTime(conversation.updatedAt)}</small></div>
+              <div className="formnote">{last ? `${String(sender?.role ?? "").includes("ADMIN") ? "Admin" : String(sender?.displayName ?? "User")}: ${String(last.body ?? "")}` : "No messages yet."}</div>
+              <label>Reply<textarea name="body" rows={3} required maxLength={5000} placeholder="Type your reply..." /></label>
+              <button className="primary" disabled={loading}>Send reply</button>
+            </form>
+          );
+        })}</div>
+        {!conversations.length && <div className="formnote">No user conversations yet. Start one from the form.</div>}
+      </article>
+    </section>
   );
 }
 
