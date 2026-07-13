@@ -1106,15 +1106,28 @@ function MessagesPanel({ conversations, users, loading, onStart, onReply }: { co
         </form>
       </article>
       <article className="panel userspanel">
-        <div className="panelhead"><div><h2>User messages</h2><p>Auto-refreshes every few seconds while this panel is open.</p></div><b>{conversations.length} chats</b></div>
+        <div className="panelhead"><div><h2>User messages</h2><p>Full chat thread. Auto-refreshes every few seconds while this panel is open.</p></div><b>{conversations.length} chats</b></div>
         <div className="userlist">{conversations.map((conversation) => {
           const user = conversation.user as RecordItem | undefined;
           const last = conversation.lastMessage as RecordItem | undefined;
           const sender = last?.sender as RecordItem | undefined;
+          const messages = asArray(conversation.messages);
           return (
             <form className="foldercard" key={String(conversation.id)} onSubmit={(event) => onReply(conversation, event)}>
               <div className="panelhead"><div><h3>{String(user?.displayName ?? "Viewer")}</h3><p>{String(user?.email ?? "")} - {Number(conversation.unreadCount ?? 0)} unread</p></div><small>{formatDateTime(conversation.updatedAt)}</small></div>
-              <div className="formnote">{last ? `${String(sender?.role ?? "").includes("ADMIN") ? "Admin" : String(sender?.displayName ?? "User")}: ${String(last.body ?? "")}` : "No messages yet."}</div>
+              <div className="chatthread">
+                {(messages.length ? messages : last ? [last] : []).map((message, index) => {
+                  const messageSender = message.sender as RecordItem | undefined;
+                  const fromAdmin = String(messageSender?.role ?? "").includes("ADMIN") || String(messageSender?.role ?? "").includes("EDITOR");
+                  return (
+                    <div className={`chatbubble ${fromAdmin ? "adminbubble" : "userbubble"}`} key={String(message.id ?? index)}>
+                      <small>{fromAdmin ? "Admin" : String(messageSender?.displayName ?? "User")} - {formatDateTime(message.createdAt)}</small>
+                      <span>{String(message.body ?? "")}</span>
+                    </div>
+                  );
+                })}
+                {!messages.length && !last && <div className="formnote">No messages yet.</div>}
+              </div>
               <label>Reply<textarea name="body" rows={3} required maxLength={5000} placeholder="Type your reply..." /></label>
               <button className="primary" disabled={loading}>Send reply</button>
             </form>
