@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "API Tokens", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -109,6 +109,9 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "Overview") await get("system", "/admin/system-status");
       if (tab === "Overview") await get("cleanup", "/admin/storage-cleanup");
       if (tab === "Users") await get("users", "/admin/users");
+      if (tab === "Messages") await get("conversations", "/admin/conversations");
+      if (tab === "Notifications") await get("notifications", "/admin/notifications");
+      if (tab === "Notifications") await get("users", "/admin/users");
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
       if (tab === "Playback sessions") await get("playback", "/admin/playback-sessions");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
@@ -502,6 +505,48 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function sendAdminMessage(conversation: RecordItem, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!conversation.id) return;
+    const form = event.currentTarget;
+    const body = String(new FormData(form).get("body") ?? "").trim();
+    if (!body) return setNotice("Message cannot be empty.");
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/conversations/${conversation.id}/messages`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify({ body }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Message failed");
+      form.reset();
+      setNotice("Reply sent.");
+      await load("Messages");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Message failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function sendNotification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/notifications`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify({ title: formData.get("title"), body: formData.get("body"), allUsers: formData.get("allUsers") === "on", userIds: formData.getAll("userIds").map(String).filter(Boolean) }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Notification failed");
+      form.reset();
+      setNotice(`Notification sent to ${payload.sent ?? 0} users.`);
+      await load("Notifications");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Notification failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -540,6 +585,8 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
         {active === "Users" && <UsersPanel users={asArray(data.users)} movies={asArray(data.movies)} collections={asArray(data.collections)} loading={loading} onCreate={createUser} onUpdate={updateUser} onDelete={deleteUser} />}
+        {active === "Messages" && <MessagesPanel conversations={asArray(data.conversations)} loading={loading} onReply={sendAdminMessage} />}
+        {active === "Notifications" && <NotificationsPanel notifications={asArray(data.notifications)} users={asArray(data.users)} loading={loading} onSend={sendNotification} />}
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
@@ -1015,6 +1062,49 @@ function AccessPicker({ movies, collections, selectedMovieIds = [], selectedColl
   );
 }
 
+function MessagesPanel({ conversations, loading, onReply }: { conversations: RecordItem[]; loading: boolean; onReply: (conversation: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+  return (
+    <article className="panel userspanel">
+      <div className="panelhead"><div><h2>User messages</h2><p>Reply to viewer support messages from the Android app.</p></div><b>{conversations.length} chats</b></div>
+      <div className="userlist">{conversations.map((conversation) => {
+        const user = conversation.user as RecordItem | undefined;
+        const last = conversation.lastMessage as RecordItem | undefined;
+        return (
+          <form className="foldercard" key={String(conversation.id)} onSubmit={(event) => onReply(conversation, event)}>
+            <div className="panelhead"><div><h3>{String(user?.displayName ?? "Viewer")}</h3><p>{String(user?.email ?? "")} - {Number(conversation.unreadCount ?? 0)} unread</p></div><small>{formatDateTime(conversation.updatedAt)}</small></div>
+            <div className="formnote">{last ? `${String((last.sender as RecordItem | undefined)?.displayName ?? "User")}: ${String(last.body ?? "")}` : "No messages yet."}</div>
+            <label>Reply<textarea name="body" rows={3} required maxLength={5000} placeholder="Type your reply..." /></label>
+            <button className="primary" disabled={loading}>Send reply</button>
+          </form>
+        );
+      })}</div>
+      {!conversations.length && <div className="formnote">No user conversations yet.</div>}
+    </article>
+  );
+}
+
+function NotificationsPanel({ notifications, users, loading, onSend }: { notifications: RecordItem[]; users: RecordItem[]; loading: boolean; onSend: (event: FormEvent<HTMLFormElement>) => void }) {
+  const viewers = users.filter((user) => user.role === "VIEWER" && user.status === "ACTIVE");
+  return (
+    <section className="grid usersgrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Send update</h2><p>Broadcast release notes, maintenance, or content updates to users.</p></div><b>{viewers.length} viewers</b></div>
+        <form onSubmit={onSend}>
+          <label>Title<input name="title" required maxLength={120} placeholder="New videos added" /></label>
+          <label>Message<textarea name="body" rows={4} required maxLength={2000} placeholder="Tell users what changed..." /></label>
+          <label className="toggle"><input name="allUsers" type="checkbox" defaultChecked /> Send to all active viewers</label>
+          <div className="accesspicker"><div><b>Or choose specific users</b><p>If “all active viewers” is unchecked, selected users will receive it.</p><div className="checkgrid">{viewers.map((user) => <label key={String(user.id)}><input name="userIds" type="checkbox" value={String(user.id)} /> <span>{String(user.email ?? user.displayName)}</span></label>)}</div></div></div>
+          <button className="primary" disabled={loading}>Send notification</button>
+        </form>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Recent notifications</h2><p>{notifications.length} sent updates</p></div></div>
+        <div className="rows">{notifications.map((notification) => <div className="row" key={String(notification.id)}><div><b>{String(notification.title ?? "Update")}</b><small>{String((notification.user as RecordItem | undefined)?.email ?? notification.userId)} - {formatDateTime(notification.createdAt)}</small><small>{String(notification.body ?? "")}</small></div><em>{notification.readAt ? "Read" : "Unread"}</em></div>)}</div>
+      </article>
+    </section>
+  );
+}
+
 function SeriesPanel({ series }: { series: RecordItem[] }) {
   return <article className="panel"><div className="panelhead"><div><h2>Series</h2><p>{series.length} series records</p></div></div><div className="rows">{series.map((row) => <div className="row" key={String(row.id)}><div><b>{String(row.title ?? "Untitled")}</b><small>{String(row.status ?? "DRAFT")} - {count(row.seasons)} seasons</small></div></div>)}</div></article>;
 }
@@ -1182,6 +1272,8 @@ function panelSubtitle(tab: Tab) {
     Processing: "Monitor encoding and packaging jobs.",
     Collections: "Browse configured home-screen rails.",
     Users: "Review viewer and operator accounts.",
+    Messages: "Reply to viewer messages.",
+    Notifications: "Send updates to viewer dashboards.",
     "API Tokens": "Create and revoke automation tokens for n8n workflows.",
     "Playback sessions": "Inspect recent stream grants.",
     "Audit logs": "Trace privileged admin actions.",
