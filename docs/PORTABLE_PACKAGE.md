@@ -305,6 +305,7 @@ Extra Android notes:
 ```text
 apps/android/OFFLINE_DOWNLOADS.md
 docs/ANDROID.md
+docs/ANDROID_AI_STUDIO_BUILDER.md
 ```
 
 ## Admin panel first checks after deploy
