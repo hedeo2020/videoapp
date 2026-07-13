@@ -776,8 +776,44 @@ function ApiTokensPanel({ tokens, newToken, loading, onCreate, onRevoke }: { tok
         <div className="panelhead"><div><h2>Automation tokens</h2><p>{tokens.length} tokens created by your admin account.</p></div></div>
         <div className="userlist">{tokens.map((token) => <div className="foldercard usercard" key={String(token.id)}><div className="panelhead"><div><h3>{String(token.name ?? "API token")}</h3><p>Created {formatDateTime(token.createdAt)} {Boolean(token.lastUsedAt) ? `- last used ${formatDateTime(token.lastUsedAt)}` : "- never used"}</p>{Boolean(token.revokedAt) && <p>Revoked {formatDateTime(token.revokedAt)}</p>}</div><div className="rowactions"><button type="button" className="danger" disabled={loading || Boolean(token.revokedAt)} onClick={() => onRevoke(token)}>Revoke</button></div></div></div>)}</div>
       </article>
-      <article className="panel userspanel">
-        <div className="panelhead"><div><h2>n8n example</h2><p>Use HTTP Request node with Authorization header.</p></div></div>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>How to use this token in n8n</h2><p>Use the HTTP Request node. Store the token as a credential or environment variable, not directly inside many workflow nodes.</p></div></div>
+        <div className="docgrid">
+          <div><b>1. Auth header</b><p>Every automation request must include this header.</p><pre>{`Authorization: Bearer YOUR_TOKEN
+Content-Type: application/json`}</pre></div>
+          <div><b>2. Base URL</b><p>Use your API URL, not the admin UI URL.</p><pre>{API}</pre></div>
+          <div><b>3. Token safety</b><p>If a token leaks, revoke it here and create a new one. Tokens are shown once only.</p></div>
+        </div>
+      </article>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>Find folder and video IDs</h2><p>Use these before creating a user so n8n can fill default folder and access rules.</p></div></div>
+        <pre>{`GET ${API}/admin/collections
+Authorization: Bearer YOUR_TOKEN
+
+Response example:
+[
+  {
+    "id": "folder-uuid",
+    "name": "Comedy",
+    "slug": "comedy",
+    "published": true
+  }
+]
+
+GET ${API}/admin/movies
+Authorization: Bearer YOUR_TOKEN
+
+Response example:
+[
+  {
+    "id": "movie-uuid",
+    "title": "My Video",
+    "status": "PUBLISHED"
+  }
+]`}</pre>
+      </article>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>Create user with folder access</h2><p>This is the recommended n8n request body for viewer accounts.</p></div></div>
         <pre>{`POST ${API}/admin/users
 Authorization: Bearer YOUR_TOKEN
 Content-Type: application/json
@@ -795,6 +831,74 @@ Content-Type: application/json
     "movieIds": []
   }
 }`}</pre>
+      </article>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>Common request bodies</h2><p>Copy the pattern that matches your automation.</p></div></div>
+        <pre>{`// User can see only one folder, and that folder opens by default
+{
+  "email": "viewer@example.com",
+  "displayName": "Viewer Name",
+  "password": "make-this-12-plus-chars",
+  "role": "VIEWER",
+  "status": "ACTIVE",
+  "accessRestricted": true,
+  "defaultCollectionId": "folder-uuid",
+  "access": {
+    "collectionIds": ["folder-uuid"],
+    "movieIds": []
+  }
+}
+
+// User can see selected folder plus one direct video
+{
+  "email": "viewer@example.com",
+  "displayName": "Viewer Name",
+  "password": "make-this-12-plus-chars",
+  "role": "VIEWER",
+  "status": "ACTIVE",
+  "accessRestricted": true,
+  "defaultCollectionId": "folder-uuid",
+  "access": {
+    "collectionIds": ["folder-uuid"],
+    "movieIds": ["movie-uuid"]
+  }
+}
+
+// User can see the full published catalog, no strict rule
+{
+  "email": "viewer@example.com",
+  "displayName": "Viewer Name",
+  "password": "make-this-12-plus-chars",
+  "role": "VIEWER",
+  "status": "ACTIVE",
+  "accessRestricted": false,
+  "defaultCollectionId": null,
+  "access": {
+    "collectionIds": [],
+    "movieIds": []
+  }
+}`}</pre>
+      </article>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>n8n workflow recipe</h2><p>A simple automation sequence for creating users from a form, sheet, or webhook.</p></div></div>
+        <ol>
+          <li>Webhook/Form Trigger receives email, name, password, and folder name.</li>
+          <li>HTTP Request: <code>GET /admin/collections</code>.</li>
+          <li>Filter/Code node: find the folder where <code>name</code> matches your requested folder.</li>
+          <li>HTTP Request: <code>POST /admin/users</code> using that folder&apos;s <code>id</code>.</li>
+          <li>Optional: send the login details to the user through email or chat.</li>
+        </ol>
+        <pre>{`// n8n expression idea after GET /admin/collections
+{{ $json.find(folder => folder.name === "Comedy").id }}`}</pre>
+      </article>
+      <article className="panel userspanel api-docs">
+        <div className="panelhead"><div><h2>Troubleshooting</h2><p>Most automation problems are one of these.</p></div></div>
+        <div className="docgrid">
+          <div><b>401 token invalid</b><p>Create a new token. Check the header starts with <code>Bearer ss_pat_</code>.</p></div>
+          <div><b>403 forbidden</b><p>The token owner must be an active admin/operator with user-management permission.</p></div>
+          <div><b>400 validation error</b><p>Password must be at least 12 characters. Folder/movie IDs must be real UUIDs.</p></div>
+          <div><b>User created but folder not visible</b><p>Make sure <code>accessRestricted</code> is true and the folder ID is in <code>access.collectionIds</code>. The API also auto-adds the default folder to allowed folders.</p></div>
+        </div>
       </article>
     </section>
   );
