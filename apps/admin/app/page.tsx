@@ -165,8 +165,14 @@ function Dashboard({ admin }: { admin: Admin }) {
   }, [active]);
   useEffect(() => {
     if (active !== "Messages") return;
+    const refreshMessagesAsRead = async () => {
+      await fetch(`${API}/admin/conversations/read-all`, { method: "PATCH", credentials: "include", headers: csrfHeaders() }).catch(() => undefined);
+      const conversations = await apiGet("/admin/conversations");
+      setData((current) => ({ ...current, conversations }));
+    };
+    void refreshMessagesAsRead();
     const timer = setInterval(() => {
-      void apiGet("/admin/conversations").then((conversations) => setData((current) => ({ ...current, conversations }))).catch(() => undefined);
+      void refreshMessagesAsRead().catch(() => undefined);
     }, 2500);
     return () => clearInterval(timer);
   }, [active]);
