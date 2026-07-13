@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "API Tokens", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -85,6 +85,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(null);
   const [editing, setEditing] = useState<RecordItem | null>(null);
+  const [newApiToken, setNewApiToken] = useState("");
 
   const metrics = useMemo(() => [
     ["Videos", count(data.movies), "catalog"],
@@ -107,6 +108,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
       if (tab === "Overview") await get("system", "/admin/system-status");
       if (tab === "Users") await get("users", "/admin/users");
+      if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
       if (tab === "Playback sessions") await get("playback", "/admin/playback-sessions");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
       if (tab === "Security") await get("security", "/admin/security-events");
@@ -205,6 +207,48 @@ function Dashboard({ admin }: { admin: Admin }) {
       await load("Video Editor");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Trim job failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createApiToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setLoading(true);
+    setNotice("");
+    setNewApiToken("");
+    try {
+      const response = await fetch(`${API}/admin/api-tokens`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify({ name: String(formData.get("name") ?? "").trim() }) });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Token creation failed");
+      form.reset();
+      setNewApiToken(String(payload.token ?? ""));
+      setNotice("API token created. Copy it now; it will only be shown once.");
+      await load("API Tokens");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Token creation failed.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function revokeApiToken(token: RecordItem) {
+    if (!token.id) return;
+    if (!confirm(`Revoke "${String(token.name ?? "this token")}"? n8n automations using it will stop working.`)) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/api-tokens/${token.id}`, { method: "DELETE", credentials: "include", headers: csrfHeaders() });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error?.message ?? "Token revoke failed");
+      }
+      setNotice("API token revoked.");
+      await load("API Tokens");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Token revoke failed.");
     } finally {
       setLoading(false);
     }
@@ -435,6 +479,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
         {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} onDelete={deleteCollection} />}
         {active === "Users" && <UsersPanel users={asArray(data.users)} movies={asArray(data.movies)} collections={asArray(data.collections)} loading={loading} onCreate={createUser} onUpdate={updateUser} onDelete={deleteUser} />}
+        {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
@@ -716,6 +761,45 @@ function UsersPanel({ users, movies, collections, loading, onCreate, onUpdate, o
   );
 }
 
+function ApiTokensPanel({ tokens, newToken, loading, onCreate, onRevoke }: { tokens: RecordItem[]; newToken: string; loading: boolean; onCreate: (event: FormEvent<HTMLFormElement>) => void; onRevoke: (token: RecordItem) => void }) {
+  return (
+    <section className="grid usersgrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Create API token</h2><p>Use this for n8n automations like creating users.</p></div><b>Bearer</b></div>
+        <form onSubmit={onCreate}>
+          <label>Token name<input name="name" required minLength={2} maxLength={80} placeholder="n8n user creation workflow" /></label>
+          <button className="primary" disabled={loading}>{loading ? "Creating..." : "Create token"}</button>
+        </form>
+        {newToken && <div className="tokenbox"><b>Copy this token now</b><code>{newToken}</code><small>It is shown once only. Store it in n8n credentials as a Bearer token.</small></div>}
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Automation tokens</h2><p>{tokens.length} tokens created by your admin account.</p></div></div>
+        <div className="userlist">{tokens.map((token) => <div className="foldercard usercard" key={String(token.id)}><div className="panelhead"><div><h3>{String(token.name ?? "API token")}</h3><p>Created {formatDateTime(token.createdAt)} {Boolean(token.lastUsedAt) ? `- last used ${formatDateTime(token.lastUsedAt)}` : "- never used"}</p>{Boolean(token.revokedAt) && <p>Revoked {formatDateTime(token.revokedAt)}</p>}</div><div className="rowactions"><button type="button" className="danger" disabled={loading || Boolean(token.revokedAt)} onClick={() => onRevoke(token)}>Revoke</button></div></div></div>)}</div>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>n8n example</h2><p>Use HTTP Request node with Authorization header.</p></div></div>
+        <pre>{`POST ${API}/admin/users
+Authorization: Bearer YOUR_TOKEN
+Content-Type: application/json
+
+{
+  "email": "viewer@example.com",
+  "displayName": "Viewer Name",
+  "password": "make-this-12-plus-chars",
+  "role": "VIEWER",
+  "status": "ACTIVE",
+  "accessRestricted": true,
+  "defaultCollectionId": "folder-uuid-or-null",
+  "access": {
+    "collectionIds": ["folder-uuid"],
+    "movieIds": []
+  }
+}`}</pre>
+      </article>
+    </section>
+  );
+}
+
 function UserEditor({ user, movies, collections, loading, onUpdate, onDelete }: { user: RecordItem; movies: RecordItem[]; collections: RecordItem[]; loading: boolean; onUpdate: (user: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (user: RecordItem) => void }) {
   return (
     <form className="foldercard usercard" onSubmit={(event) => onUpdate(user, event)}>
@@ -879,6 +963,7 @@ function panelSubtitle(tab: Tab) {
     Processing: "Monitor encoding and packaging jobs.",
     Collections: "Browse configured home-screen rails.",
     Users: "Review viewer and operator accounts.",
+    "API Tokens": "Create and revoke automation tokens for n8n workflows.",
     "Playback sessions": "Inspect recent stream grants.",
     "Audit logs": "Trace privileged admin actions.",
     Security: "Review security events.",
