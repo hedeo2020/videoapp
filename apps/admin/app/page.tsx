@@ -3,7 +3,7 @@
 import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Series", "Uploads", "Processing", "Collections", "Users", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
@@ -129,7 +129,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (tab === "Notifications") await get("notifications", "/admin/notifications");
       if (tab === "Notifications") await get("users", "/admin/users");
       if (tab === "API Tokens") await get("apiTokens", "/admin/api-tokens");
-      if (tab === "Playback sessions") await get("playback", "/admin/playback-sessions");
+      if (["Playback sessions", "Watermark Trace"].includes(tab)) await get("playback", "/admin/playback-sessions");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
       if (tab === "Security") await get("security", "/admin/security-events");
       if (tab === "Settings") await get("settings", "/admin/settings");
@@ -658,6 +658,7 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Notifications" && <NotificationsPanel notifications={asArray(data.notifications)} users={asArray(data.users)} loading={loading} onSend={sendNotification} />}
         {active === "API Tokens" && <ApiTokensPanel tokens={asArray(data.apiTokens)} newToken={newApiToken} loading={loading} onCreate={createApiToken} onRevoke={revokeApiToken} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
+        {active === "Watermark Trace" && <WatermarkTracePanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
         {active === "Security" && <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />}
         {active === "Settings" && <SettingsPanel settings={data.settings as RecordItem | undefined} loading={loading} onSave={updateSettings} />}
@@ -1204,7 +1205,45 @@ function SeriesPanel({ series }: { series: RecordItem[] }) {
 }
 
 function PlaybackPanel({ rows }: { rows: RecordItem[] }) {
-  return <article className="panel"><div className="panelhead"><div><h2>Playback sessions</h2><p>{rows.length} recent sessions</p></div></div><div className="rows">{rows.map((row) => <div className="row" key={String(row.id)}><div><b>{String((row.user as RecordItem | undefined)?.email ?? row.userId)}</b><small>{String(row.deviceId ?? "")} - expires {format(row.expiresAt)}</small></div><em>{row.revokedAt ? "Revoked" : "Active"}</em></div>)}</div></article>;
+  return <article className="panel"><div className="panelhead"><div><h2>Playback sessions</h2><p>{rows.length} recent sessions</p></div></div><div className="rows">{rows.map((row) => <div className="row" key={String(row.id)}><div><b>{String((row.user as RecordItem | undefined)?.email ?? row.userId)}</b><small>{String(row.deviceId ?? "")} - expires {format(row.expiresAt)}</small><small>Watermark: {watermarkForSession(row)}</small></div><em>{row.revokedAt ? "Revoked" : "Active"}</em></div>)}</div></article>;
+}
+
+function WatermarkTracePanel({ rows }: { rows: RecordItem[] }) {
+  const [query, setQuery] = useState("");
+  const parsed = parseWatermark(query);
+  const matches = parsed ? rows.filter((row) => String(row.userId ?? "").toLowerCase().startsWith(parsed.userPrefix) && String(row.id ?? "").toLowerCase().endsWith(parsed.sessionSuffix)) : [];
+  return (
+    <section className="grid tracegrid">
+      <article className="panel upload">
+        <div className="panelhead"><div><h2>Watermark Trace</h2><p>Paste the watermark shown on a leaked/screen-recorded video.</p></div><b>{matches.length} match{matches.length === 1 ? "" : "es"}</b></div>
+        <label>Watermark code<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Example: a91f..7b2c" /></label>
+        <div className="formnote">Format is <b>first 4 of user ID</b> + <b>..</b> + <b>last 4 of playback session ID</b>. Recent sessions are searched automatically.</div>
+      </article>
+      <article className="panel userspanel">
+        <div className="panelhead"><div><h2>Trace results</h2><p>{parsed ? `Looking for user ${parsed.userPrefix} and session ending ${parsed.sessionSuffix}` : "Enter a watermark to start."}</p></div></div>
+        <div className="userlist">
+          {matches.map((row) => {
+            const user = row.user as RecordItem | undefined;
+            const asset = row.videoAsset as RecordItem | undefined;
+            return (
+              <div className="foldercard tracecard" key={String(row.id)}>
+                <div className="panelhead"><div><h3>{String(user?.email ?? row.userId)}</h3><p>{String(user?.displayName ?? "Viewer")} - {sessionVideoTitle(asset)}</p></div><em>{row.revokedAt ? "Revoked" : "Active"}</em></div>
+                <div className="tracefacts">
+                  <span><b>Watermark</b>{watermarkForSession(row)}</span>
+                  <span><b>User ID</b>{String(row.userId ?? "")}</span>
+                  <span><b>Session ID</b>{String(row.id ?? "")}</span>
+                  <span><b>Device</b>{String(row.deviceId ?? "Unknown")}</span>
+                  <span><b>Created</b>{formatDateTime(row.createdAt)}</span>
+                  <span><b>Expires</b>{formatDateTime(row.expiresAt)}</span>
+                </div>
+              </div>
+            );
+          })}
+          {parsed && !matches.length && <div className="formnote">No matching recent playback session found. The session may be older than the current recent-session list.</div>}
+        </div>
+      </article>
+    </section>
+  );
 }
 
 function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }) {
@@ -1370,9 +1409,27 @@ function panelSubtitle(tab: Tab) {
     Notifications: "Send updates to viewer dashboards.",
     "API Tokens": "Create and revoke automation tokens for n8n workflows.",
     "Playback sessions": "Inspect recent stream grants.",
+    "Watermark Trace": "Paste a playback watermark and identify the user/session.",
     "Audit logs": "Trace privileged admin actions.",
     Security: "Review security events.",
     Settings: "Inspect runtime configuration.",
   };
   return labels[tab];
+}
+
+function parseWatermark(value: string) {
+  const match = value.trim().toLowerCase().match(/^([a-f0-9]{4})\s*\.\.\s*([a-f0-9]{4})$/);
+  return match ? { userPrefix: match[1], sessionSuffix: match[2] } : null;
+}
+
+function watermarkForSession(row: RecordItem) {
+  const userId = String(row.userId ?? "");
+  const sessionId = String(row.id ?? "");
+  return userId && sessionId ? `${userId.slice(0, 4)}..${sessionId.slice(-4)}` : "Unknown";
+}
+
+function sessionVideoTitle(asset?: RecordItem) {
+  const movie = asset?.movie as RecordItem | undefined;
+  const episode = asset?.episode as RecordItem | undefined;
+  return String(movie?.title ?? episode?.title ?? asset?.id ?? "Unknown video");
 }
