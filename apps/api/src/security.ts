@@ -7,3 +7,4 @@ export const hashToken=(token:string)=>createHash("sha256").update(token).digest
 export async function signAccess(sub:string,role:string){return new SignJWT({role}).setProtectedHeader({alg:"HS256"}).setSubject(sub).setIssuedAt().setExpirationTime(`${config.ACCESS_TOKEN_TTL_SECONDS}s`).sign(accessKey)}
 export async function verifyAccess(token:string){return (await jwtVerify(token,accessKey,{algorithms:["HS256"]})).payload}
 export async function signPlayback(input:{sub:string;sid:string;videoId:string;deviceId:string}){return new SignJWT({sid:input.sid,videoId:input.videoId,deviceId:input.deviceId,scope:"playback"}).setProtectedHeader({alg:"HS256"}).setSubject(input.sub).setIssuedAt().setExpirationTime(`${config.PLAYBACK_SESSION_TTL_SECONDS}s`).sign(playbackKey)}
+export async function verifyPlayback(token:string){return (await jwtVerify(token,playbackKey,{algorithms:["HS256"]})).payload}
