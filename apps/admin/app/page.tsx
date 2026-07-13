@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
 const nav = ["Overview", "Catalog", "Videos", "Series", "Uploads", "Processing", "Collections", "Users", "Playback sessions", "Audit logs", "Security", "Settings"] as const;
@@ -421,7 +421,7 @@ function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate, on
 }
 
 function CollectionEditor({ collection, collections, movies, loading, onUpdate, onDelete }: { collection: RecordItem; collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (collection: RecordItem) => void }) {
-  const selected = collectionMovieIds(collection);
+  const selectedIds = collectionMovieIds(collection);
   return (
     <form className="foldercard" onSubmit={(event) => onUpdate(collection, event)}>
       <div className="panelhead"><div><h3>{String(collection.name ?? "Untitled folder")}</h3><p>{String(collection.slug ?? "")} - {collection.published ? "Visible in Android" : "Draft/hidden"} - {count(collection.items)} videos</p></div><div className="rowactions"><button type="button" className="danger" disabled={loading} onClick={() => onDelete(collection)}>Delete</button><button disabled={loading}>Save folder</button></div></div>
@@ -431,15 +431,65 @@ function CollectionEditor({ collection, collections, movies, loading, onUpdate, 
         <label>Parent<select name="parentId" defaultValue={String(collection.parentId ?? "")}><option value="">Top level</option>{collections.filter((candidate) => candidate.id !== collection.id).map((candidate) => <option key={String(candidate.id)} value={String(candidate.id)}>{folderLabel(candidate)}</option>)}</select></label>
         <label className="toggle"><input name="published" type="checkbox" defaultChecked={Boolean(collection.published)} /> Show in Android app</label>
       </div>
-      <MovieChecklist movies={movies} selected={selected} />
+      <MovieChecklist movies={movies} selectedIds={selectedIds} />
     </form>
   );
 }
 
-function MovieChecklist({ movies, selected = new Set<string>() }: { movies: RecordItem[]; selected?: Set<string> }) {
-  const published = movies.filter((movie) => movie.status === "PUBLISHED");
+function MovieChecklist({ movies, selectedIds = [] }: { movies: RecordItem[]; selectedIds?: string[] }) {
+  const published = useMemo(() => movies.filter((movie) => movie.status === "PUBLISHED"), [movies]);
+  const movieIds = useMemo(() => new Set(published.map((movie) => String(movie.id))), [published]);
+  const [checkedIds, setCheckedIds] = useState<string[]>([]);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCheckedIds(selectedIds.filter((id) => movieIds.has(id)));
+  }, [movies, movieIds, selectedIds.join("|")]);
+
+  const checkedSet = new Set(checkedIds);
+  const availableMovies = published.filter((movie) => !checkedSet.has(String(movie.id)));
+  const movieById = new Map(published.map((movie) => [String(movie.id), movie]));
+
+  function toggleMovie(id: string, checked: boolean) {
+    setCheckedIds(checked ? [...checkedIds, id] : checkedIds.filter((movieId) => movieId !== id));
+  }
+
+  function moveDragged(event: DragEvent<HTMLDivElement>, targetId: string) {
+    event.preventDefault();
+    if (!draggingId || draggingId === targetId) return;
+    const from = checkedIds.indexOf(draggingId);
+    const to = checkedIds.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    const next = [...checkedIds];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setCheckedIds(next);
+  }
+
   if (!published.length) return <div className="formnote">Publish videos first, then add them to folders.</div>;
-  return <div className="checkgrid">{published.map((movie) => <label key={String(movie.id)}><input name="movieIds" type="checkbox" value={String(movie.id)} defaultChecked={selected.has(String(movie.id))} /> <span>{String(movie.title ?? "Untitled")}</span></label>)}</div>;
+  return (
+    <div className="foldervideos">
+      <input name="movieIds" value="" readOnly hidden />
+      <div className="draglist">
+        <b>Selected videos - drag to arrange</b>
+        {checkedIds.length ? checkedIds.map((id, index) => {
+          const movie = movieById.get(id);
+          return (
+            <div className={`dragrow${draggingId === id ? " dragging" : ""}`} key={id} draggable onDragStart={() => setDraggingId(id)} onDragEnd={() => setDraggingId(null)} onDragOver={(event) => moveDragged(event, id)}>
+              <span className="draghandle" aria-hidden="true">☰</span>
+              <span>{index + 1}. {String(movie?.title ?? "Untitled")}</span>
+              <button type="button" onClick={() => toggleMovie(id, false)}>Remove</button>
+              <input name="movieIds" value={id} readOnly hidden />
+            </div>
+          );
+        }) : <div className="formnote">Choose videos below, then drag them here into the exact order you want.</div>}
+      </div>
+      <div className="checkgrid">{availableMovies.map((movie) => {
+        const id = String(movie.id);
+        return <label key={id}><input type="checkbox" checked={false} onChange={(event) => toggleMovie(id, event.currentTarget.checked)} /> <span>{String(movie.title ?? "Untitled")}</span></label>;
+      })}</div>
+    </div>
+  );
 }
 
 function SeriesPanel({ series }: { series: RecordItem[] }) {
@@ -531,7 +581,7 @@ function collectionPayload(formData: FormData) {
 }
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
 function firstAsset(movie: RecordItem): RecordItem | null { return asArray(movie.assets)[0] ?? null; }
-function collectionMovieIds(collection: RecordItem) { return new Set(asArray(collection.items).map((item) => String(item.movieId ?? (item.movie as RecordItem | undefined)?.id ?? "")).filter(Boolean)); }
+function collectionMovieIds(collection: RecordItem) { return asArray(collection.items).map((item) => String(item.movieId ?? (item.movie as RecordItem | undefined)?.id ?? "")).filter(Boolean); }
 function folderLabel(collection: RecordItem) { return `${String((collection.parent as RecordItem | undefined)?.name ? `${(collection.parent as RecordItem).name} / ` : "")}${String(collection.name ?? "Untitled")}`; }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
