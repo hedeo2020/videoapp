@@ -16,13 +16,52 @@ Use this flow for in-app-only offline videos:
    }
    ```
 
-3. The API returns `downloadUrl`, `videoAssetId`, and `expiresAt`.
+3. The API returns `downloadUrl`, `videoAssetId`, `bytesExpected`, and `expiresAt`.
 4. Download the file with OkHttp into Android app-private storage only:
 
    - Use `context.noBackupFilesDir/securestream_offline/` or `context.filesDir/securestream_offline/`.
    - Do not use `Downloads`, `MediaStore`, public external storage, or `DownloadManager`.
    - Name files by `videoAssetId`, not by title, for example `<videoAssetId>.mp4`.
    - Save metadata in DataStore/Room: title, artwork, duration, downloadedAt, expiresAt, localPath.
+
+## Realtime download progress
+
+Downloads must show realtime progress instead of staying at 0% until complete.
+
+Required behavior:
+
+1. After `POST /offline/downloads`, read `bytesExpected` from the response.
+2. Start the download with OkHttp.
+3. Do not use a one-shot body save that only reports completion.
+4. Read the response stream in chunks, for example 8 KB, and write each chunk to the private file.
+5. After every chunk:
+
+   - Add the chunk size to `bytesDownloaded`.
+   - Calculate `progress = (bytesDownloaded * 100 / bytesExpected).toInt()`.
+   - Update the UI state immediately.
+   - Show text like `Downloading... 37%`.
+
+6. If `bytesExpected` is missing or zero, fall back to the response `Content-Length` header.
+7. If both are unavailable, show downloaded MB instead of percent.
+8. When the file completes, verify `bytesDownloaded >= bytesExpected` when `bytesExpected > 0`.
+9. Only then mark the download as complete in Room/DataStore.
+10. If the download fails or is cancelled, delete the partial file or mark it as resumable.
+
+Pseudo-code:
+
+```kotlin
+val expected = grant.bytesExpected ?: response.body.contentLength()
+var downloaded = 0L
+val buffer = ByteArray(8 * 1024)
+while (true) {
+    val read = input.read(buffer)
+    if (read == -1) break
+    output.write(buffer, 0, read)
+    downloaded += read
+    val percent = if (expected > 0) ((downloaded * 100) / expected).toInt() else null
+    updateDownloadProgress(videoId, downloaded, expected, percent)
+}
+```
 
 5. Play offline with Media3 ExoPlayer using `MediaItem.fromUri(localFile.toUri())`.
 6. Keep `FLAG_SECURE` enabled on playback screens.
