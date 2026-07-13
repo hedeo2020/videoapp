@@ -174,6 +174,10 @@ function Dashboard({ admin }: { admin: Admin }) {
           synopsis: data.get("synopsis"),
           maturityRating: data.get("maturityRating") || undefined,
           status: data.get("status"),
+          featured: data.get("featured") === "on",
+          posterUrl: optionalFormString(data, "posterUrl"),
+          backdropUrl: optionalFormString(data, "backdropUrl"),
+          trailerUrl: optionalFormString(data, "trailerUrl"),
         }),
       });
       const payload = await response.json().catch(() => ({}));
@@ -390,7 +394,7 @@ function PreviewModal({ preview, onClose }: { preview: { title: string; url: str
 }
 
 function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordItem; loading: boolean; onCancel: () => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  return <article className="panel upload editpanel"><div className="panelhead"><div><h2>Edit video</h2><p>{String(movie.title ?? "Untitled")}</p></div><button onClick={onCancel}>Cancel</button></div><form onSubmit={onSubmit}><label>Title<input name="title" required maxLength={160} defaultValue={String(movie.title ?? "")} /></label><label>Synopsis<textarea name="synopsis" rows={4} required defaultValue={String(movie.synopsis ?? "")} /></label><label>Maturity rating<input name="maturityRating" maxLength={20} defaultValue={String(movie.maturityRating ?? "")} /></label><label>Status<select name="status" defaultValue={String(movie.status ?? "DRAFT")}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="ARCHIVED">Archived</option></select></label><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save changes"}</button></form></article>;
+  return <article className="panel upload editpanel"><div className="panelhead"><div><h2>Edit video</h2><p>{String(movie.title ?? "Untitled")}</p></div><button onClick={onCancel}>Cancel</button></div><form onSubmit={onSubmit}><label>Title<input name="title" required maxLength={160} defaultValue={String(movie.title ?? "")} /></label><label>Synopsis<textarea name="synopsis" rows={4} required defaultValue={String(movie.synopsis ?? "")} /></label><label>Maturity rating<input name="maturityRating" maxLength={20} defaultValue={String(movie.maturityRating ?? "")} /></label><label>Status<select name="status" defaultValue={String(movie.status ?? "DRAFT")}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="ARCHIVED">Archived</option></select></label><label className="toggle"><input name="featured" type="checkbox" defaultChecked={Boolean(movie.featured)} /> Feature this video in the app</label><label>Poster photo URL<input name="posterUrl" type="url" placeholder="https://..." defaultValue={String(movie.posterUrl ?? "")} /></label><label>Featured backdrop photo URL<input name="backdropUrl" type="url" placeholder="https://..." defaultValue={String(movie.backdropUrl ?? "")} /></label><label>Trailer / featured video URL<input name="trailerUrl" type="url" placeholder="https://..." defaultValue={String(movie.trailerUrl ?? "")} /></label><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save changes"}</button></form></article>;
 }
 
 function CatalogPanel({ collections, movies, loading, onCreateCollection, onUpdateCollection, onDeleteCollection, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreateCollection: (event: FormEvent<HTMLFormElement>) => void; onUpdateCollection: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDeleteCollection: (collection: RecordItem) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
@@ -404,18 +408,19 @@ function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate, on
       <form className="folderform" onSubmit={onCreate}>
         <label>New folder name<input name="name" placeholder="Action, Kids, Drama..." required maxLength={120} /></label>
         <label>Sort order<input name="sortOrder" type="number" defaultValue={collections.length + 1} /></label>
+        <label>Parent folder<select name="parentId" defaultValue=""><option value="">Top level</option>{collections.map((collection) => <option key={String(collection.id)} value={String(collection.id)}>{folderLabel(collection)}</option>)}</select></label>
         <label className="toggle"><input name="published" type="checkbox" defaultChecked /> Show in Android app</label>
         <MovieChecklist movies={movies} />
         <button className="primary" disabled={loading}>Create folder</button>
       </form>
       <div className="folderlist">
-        {collections.map((collection) => <CollectionEditor key={String(collection.id)} collection={collection} movies={movies} loading={loading} onUpdate={onUpdate} onDelete={onDelete} />)}
+        {collections.map((collection) => <CollectionEditor key={String(collection.id)} collection={collection} collections={collections} movies={movies} loading={loading} onUpdate={onUpdate} onDelete={onDelete} />)}
       </div>
     </article>
   );
 }
 
-function CollectionEditor({ collection, movies, loading, onUpdate, onDelete }: { collection: RecordItem; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (collection: RecordItem) => void }) {
+function CollectionEditor({ collection, collections, movies, loading, onUpdate, onDelete }: { collection: RecordItem; collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onDelete: (collection: RecordItem) => void }) {
   const selected = collectionMovieIds(collection);
   return (
     <form className="foldercard" onSubmit={(event) => onUpdate(collection, event)}>
@@ -423,6 +428,7 @@ function CollectionEditor({ collection, movies, loading, onUpdate, onDelete }: {
       <div className="folderfields">
         <label>Name<input name="name" required maxLength={120} defaultValue={String(collection.name ?? "")} /></label>
         <label>Sort<input name="sortOrder" type="number" defaultValue={Number(collection.sortOrder ?? 0)} /></label>
+        <label>Parent<select name="parentId" defaultValue={String(collection.parentId ?? "")}><option value="">Top level</option>{collections.filter((candidate) => candidate.id !== collection.id).map((candidate) => <option key={String(candidate.id)} value={String(candidate.id)}>{folderLabel(candidate)}</option>)}</select></label>
         <label className="toggle"><input name="published" type="checkbox" defaultChecked={Boolean(collection.published)} /> Show in Android app</label>
       </div>
       <MovieChecklist movies={movies} selected={selected} />
@@ -509,18 +515,24 @@ function authHeaders(): Record<string, string> {
 function csrfHeaders(): Record<string, string> {
   return { ...authHeaders(), "x-csrf-token": sessionStorage.getItem("ss_csrf") ?? "" };
 }
+function optionalFormString(formData: FormData, key: string) {
+  const value = String(formData.get(key) ?? "").trim();
+  return value || undefined;
+}
 function collectionPayload(formData: FormData) {
   const movieIds = formData.getAll("movieIds").map(String).filter(Boolean);
   return {
     name: String(formData.get("name") ?? "").trim(),
     published: formData.get("published") === "on",
     sortOrder: Number(formData.get("sortOrder") || 0),
+    parentId: String(formData.get("parentId") ?? "") || null,
     items: movieIds.map((movieId, index) => ({ movieId, sortOrder: index })),
   };
 }
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
 function firstAsset(movie: RecordItem): RecordItem | null { return asArray(movie.assets)[0] ?? null; }
 function collectionMovieIds(collection: RecordItem) { return new Set(asArray(collection.items).map((item) => String(item.movieId ?? (item.movie as RecordItem | undefined)?.id ?? "")).filter(Boolean)); }
+function folderLabel(collection: RecordItem) { return `${String((collection.parent as RecordItem | undefined)?.name ? `${(collection.parent as RecordItem).name} / ` : "")}${String(collection.name ?? "Untitled")}`; }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
 function format(value: unknown) { if (value === null || value === undefined) return ""; if (typeof value === "object") return JSON.stringify(value); return String(value); }
