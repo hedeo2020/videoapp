@@ -148,15 +148,34 @@ function Dashboard({ admin }: { admin: Admin }) {
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
+    const fileInput = form.elements.namedItem("file") as HTMLInputElement | null;
+    const files = Array.from(fileInput?.files ?? []);
+    if (!files.length) return setNotice("Choose at least one video file.");
+    const formData = new FormData(form);
+    const uploaded: RecordItem[] = [];
     setLoading(true);
     setUploadProgress(0);
     setConversionProgress(null);
-    setUploadPhase("Uploading");
+    setUploadPhase(files.length > 1 ? `Uploading 1/${files.length}` : "Uploading");
     setNotice("");
     try {
-      const payload = await uploadWithProgress(`${API}/admin/uploads/direct`, new FormData(form), csrfHeaders(), setUploadProgress, setUploadPhase, setConversionProgress);
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setConversionProgress(null);
+        setUploadProgress(files.length > 1 ? Math.round((index / files.length) * 100) : 0);
+        setNotice(files.length > 1 ? `Uploading ${index + 1}/${files.length}: ${file.name}` : "");
+        const payload = await uploadWithProgress(
+          `${API}/admin/uploads/direct`,
+          uploadFormData(formData, file, index, files.length),
+          csrfHeaders(),
+          (progress) => setUploadProgress(files.length > 1 ? Math.round(((index + progress / 100) / files.length) * 100) : progress),
+          (phase) => setUploadPhase(files.length > 1 ? `${phase} ${index + 1}/${files.length}` : phase),
+          setConversionProgress
+        );
+        uploaded.push(payload);
+      }
       form.reset();
-      setNotice(`Uploaded "${payload.title}" as a draft title.`);
+      setNotice(uploaded.length === 1 ? `Uploaded "${uploaded[0].title}" as a draft title.` : `Uploaded ${uploaded.length} videos as draft titles.`);
       await load("Uploads");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Upload failed.");
@@ -598,20 +617,20 @@ function StatusGauge({ label, value, detail, note }: { label: string; value: num
 }
 
 function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, uploadPhase, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; conversionProgress: number | null; uploadPhase: string; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
-  const converting = uploadPhase === "Converting preview";
+  const converting = uploadPhase.startsWith("Converting preview");
   const visibleProgress = converting ? conversionProgress ?? 0 : uploadProgress ?? 0;
   return (
     <section className="grid">
       <article className="panel upload">
-        <div className="panelhead"><div><h2>Upload video</h2><p>Create a draft video and store the source file.</p></div><b>Draft</b></div>
+        <div className="panelhead"><div><h2>Upload videos</h2><p>Create one draft video per selected file.</p></div><b>Batch ready</b></div>
         <form onSubmit={onUpload}>
-          <label>Title<input name="title" required maxLength={160} /></label>
+          <label>Title or batch prefix<input name="title" maxLength={160} placeholder="Optional. Blank uses each filename." /></label>
           <label>Synopsis<textarea name="synopsis" rows={4} /></label>
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
-          <label>Video file<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" required /></label>
-          <small>Most video formats are accepted. The server creates an MP4/H.264 preview for browser playback after upload.</small>
+          <label>Video files<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" multiple required /></label>
+          <small>Select one or many videos. Each selected file becomes a separate draft. The server creates an MP4/H.264 preview for browser playback after upload.</small>
           {uploadProgress !== null && <div className={`uploadprogress ${converting ? "processing" : ""}`}><span style={{ width: `${visibleProgress}%` }} /><b>{converting ? `Converting preview... ${visibleProgress}%` : `Uploading ${visibleProgress}%`}</b></div>}
-          <button className="primary" disabled={uploading}>{uploading ? uploadPhase || "Working..." : "Upload title"}</button>
+          <button className="primary" disabled={uploading}>{uploading ? uploadPhase || "Working..." : "Upload selected videos"}</button>
         </form>
       </article>
       <MoviesPanel movies={movies} onPublish={onPublish} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact />
@@ -1091,6 +1110,19 @@ function csrfHeaders(): Record<string, string> {
 function optionalFormString(formData: FormData, key: string) {
   const value = String(formData.get(key) ?? "").trim();
   return value || undefined;
+}
+function uploadFormData(source: FormData, file: File, index: number, total: number) {
+  const body = new FormData();
+  const baseTitle = String(source.get("title") ?? "").trim();
+  const title = total > 1 ? (baseTitle ? `${baseTitle} ${index + 1}` : titleFromFileName(file.name)) : (baseTitle || titleFromFileName(file.name));
+  body.append("title", title);
+  body.append("synopsis", String(source.get("synopsis") ?? ""));
+  body.append("maturityRating", String(source.get("maturityRating") ?? ""));
+  body.append("file", file, file.name);
+  return body;
+}
+function titleFromFileName(name: string) {
+  return name.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim().slice(0, 160) || "Uploaded video";
 }
 function collectionPayload(formData: FormData) {
   const movieIds = formData.getAll("movieIds").map(String).filter(Boolean);

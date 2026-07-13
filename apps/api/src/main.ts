@@ -27,7 +27,7 @@ const app=Fastify({logger:{level:config.NODE_ENV==="production"?"info":"debug",r
 await app.register(helmet,{global:true});
 await app.register(cors,{origin:config.ADMIN_ORIGIN,credentials:true,methods:["GET","POST","PATCH","DELETE"]});
 await app.register(cookie);
-await app.register(multipart,{limits:{fileSize:Number(process.env.MAX_UPLOAD_BYTES??10737418240),files:1}});
+await app.register(multipart,{limits:{fileSize:Number(process.env.MAX_UPLOAD_BYTES??10737418240),files:Number(process.env.MAX_UPLOAD_FILES??20)}});
 await app.register(rateLimit,{max:100,timeWindow:"1 minute"});
 
 type Auth={sub:string;role:Role};
