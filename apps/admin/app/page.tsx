@@ -1545,7 +1545,7 @@ function SettingsPanel({ settings, loading, onSave, onTestAlert }: { settings?: 
           </label>
           <label>Android update message<input name="androidUpdateMessage" defaultValue={String(android.message ?? "")} /></label>
           <label>Android download URL<input name="androidDownloadUrl" placeholder="https://..." defaultValue={String(android.downloadUrl ?? "")} /></label>
-          <div className="formnote">Alerts configured: {settings?.alertsConfigured ? "Yes" : "No"}. Use ALERT_WEBHOOK_URL or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID on the API server.</div>
+          <div className="formnote">Alerts configured: {settings?.alertsConfigured ? "Yes" : "No"}. Use DISCORD_WEBHOOK_URL, ALERT_WEBHOOK_URL, or TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID on the API server.</div>
           <div className="rowactions"><button type="button" disabled={loading} onClick={onTestAlert}>Test alert</button><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save settings"}</button></div>
         </form>
       </article>
