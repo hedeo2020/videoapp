@@ -702,6 +702,7 @@ function UsersPanel({ users, movies, collections, loading, onCreate, onUpdate, o
             <label>Role<select name="role" defaultValue="VIEWER"><option value="VIEWER">Viewer</option><option value="EDITOR">Editor</option><option value="ADMIN">Admin</option><option value="SUPER_ADMIN">Super admin</option></select></label>
             <label>Status<select name="status" defaultValue="ACTIVE"><option value="ACTIVE">Active</option><option value="SUSPENDED">Suspended</option><option value="DISABLED">Disabled</option></select></label>
           </div>
+          <label>Default folder<select name="defaultCollectionId" defaultValue=""><option value="">No default folder</option>{collections.map((collection) => <option key={String(collection.id)} value={String(collection.id)}>{folderLabel(collection)}</option>)}</select></label>
           <label className="toggle"><input name="accessRestricted" type="checkbox" defaultChecked /> Restrict this user to selected folders/videos</label>
           <AccessPicker movies={movies} collections={collections} />
           <button className="primary" disabled={loading}>Create user</button>
@@ -726,6 +727,7 @@ function UserEditor({ user, movies, collections, loading, onUpdate, onDelete }: 
         <label>Status<select name="status" defaultValue={String(user.status ?? "ACTIVE")}><option value="ACTIVE">Active</option><option value="SUSPENDED">Suspended</option><option value="DISABLED">Disabled</option></select></label>
       </div>
       <label>New password (leave blank to keep current)<input name="password" type="password" minLength={12} placeholder="Optional" /></label>
+      <label>Default folder<select name="defaultCollectionId" defaultValue={String(user.defaultCollectionId ?? "")}><option value="">No default folder</option>{collections.map((collection) => <option key={String(collection.id)} value={String(collection.id)}>{folderLabel(collection)}</option>)}</select></label>
       <label className="toggle"><input name="accessRestricted" type="checkbox" defaultChecked={Boolean(user.accessRestricted)} /> Restrict this user to selected folders/videos</label>
       <AccessPicker movies={movies} collections={collections} selectedMovieIds={userMovieAccessIds(user)} selectedCollectionIds={userCollectionAccessIds(user)} />
     </form>
@@ -837,6 +839,7 @@ function userPayload(formData: FormData, requirePassword: boolean) {
     role: String(formData.get("role") ?? "VIEWER"),
     status: String(formData.get("status") ?? "ACTIVE"),
     accessRestricted: formData.get("accessRestricted") === "on",
+    defaultCollectionId: optionalFormString(formData, "defaultCollectionId") ?? null,
     access: {
       movieIds: formData.getAll("movieIds").map(String).filter(Boolean),
       collectionIds: formData.getAll("collectionIds").map(String).filter(Boolean),

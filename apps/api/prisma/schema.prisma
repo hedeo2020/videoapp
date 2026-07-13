@@ -55,8 +55,10 @@ model User {
   failedLoginCount Int               @default(0)
   lockedUntil      DateTime?
   accessRestricted Boolean           @default(false)
+  defaultCollectionId String?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
+  defaultCollection Collection?       @relation("UserDefaultCollection", fields: [defaultCollectionId], references: [id], onDelete: SetNull)
   sessions         RefreshSession[]
   playbackSessions PlaybackSession[]
   progress         WatchProgress[]
@@ -223,6 +225,7 @@ model Collection {
   children  Collection[]      @relation("CollectionHierarchy")
   items     CollectionItem[]
   userAccess UserCollectionAccess[]
+  defaultForUsers User[]      @relation("UserDefaultCollection")
 
   @@index([parentId])
 }
