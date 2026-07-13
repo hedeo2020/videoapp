@@ -99,7 +99,7 @@ function Dashboard({ admin }: { admin: Admin }) {
     try {
       const next: Record<string, unknown> = { ...data };
       const get = async (key: string, path: string) => { next[key] = await apiGet(path); };
-      if (["Overview", "Movies", "Uploads"].includes(tab)) await get("movies", "/admin/movies");
+      if (["Overview", "Movies", "Uploads", "Collections", "Catalog"].includes(tab)) await get("movies", "/admin/movies");
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
@@ -211,6 +211,55 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function createCollection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/collections`, {
+        method: "POST",
+        credentials: "include",
+        headers: { ...csrfHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(collectionPayload(formData)),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Could not create folder");
+      form.reset();
+      setNotice(`Created folder "${payload.name}".`);
+      await load("Collections");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create folder.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function updateCollection(collection: RecordItem, event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!collection.id) return;
+    const formData = new FormData(event.currentTarget);
+    setLoading(true);
+    setNotice("");
+    try {
+      const response = await fetch(`${API}/admin/collections/${collection.id}`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { ...csrfHeaders(), "content-type": "application/json" },
+        body: JSON.stringify(collectionPayload(formData)),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error?.message ?? "Could not update folder");
+      setNotice(`Updated folder "${payload.name}".`);
+      await load("Collections");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update folder.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function previewMovie(movie: RecordItem) {
     const asset = firstAsset(movie);
     if (!asset?.id) {
@@ -240,12 +289,12 @@ function Dashboard({ admin }: { admin: Admin }) {
         {active === "Overview" && <Overview metrics={metrics} data={data} />}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
-        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
+        {active === "Catalog" && <CatalogPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreateCollection={createCollection} onUpdateCollection={updateCollection} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Movies" && <MoviesPanel movies={asArray(data.movies)} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Series" && <SeriesPanel series={asArray(data.series)} />}
         {active === "Uploads" && <UploadsPanel movies={asArray(data.movies)} uploading={loading} uploadProgress={uploadProgress} conversionProgress={conversionProgress} uploadPhase={uploadPhase} onUpload={uploadMovie} onPublish={publishMovie} onPreview={previewMovie} onEdit={setEditing} onDelete={deleteMovie} />}
         {active === "Processing" && <JsonPanel title="Processing jobs" value={data.processing} />}
-        {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} />}
+        {active === "Collections" && <CollectionsPanel collections={asArray(data.collections)} movies={asArray(data.movies)} loading={loading} onCreate={createCollection} onUpdate={updateCollection} />}
         {active === "Users" && <TablePanel rows={asArray(data.users)} columns={["email", "displayName", "role", "status", "createdAt"]} />}
         {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
         {active === "Audit logs" && <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />}
@@ -323,12 +372,47 @@ function EditMoviePanel({ movie, loading, onCancel, onSubmit }: { movie: RecordI
   return <article className="panel upload editpanel"><div className="panelhead"><div><h2>Edit video</h2><p>{String(movie.title ?? "Untitled")}</p></div><button onClick={onCancel}>Cancel</button></div><form onSubmit={onSubmit}><label>Title<input name="title" required maxLength={160} defaultValue={String(movie.title ?? "")} /></label><label>Synopsis<textarea name="synopsis" rows={4} required defaultValue={String(movie.synopsis ?? "")} /></label><label>Maturity rating<input name="maturityRating" maxLength={20} defaultValue={String(movie.maturityRating ?? "")} /></label><label>Status<select name="status" defaultValue={String(movie.status ?? "DRAFT")}><option value="DRAFT">Draft</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="ARCHIVED">Archived</option></select></label><button className="primary" disabled={loading}>{loading ? "Saving..." : "Save changes"}</button></form></article>;
 }
 
-function CatalogPanel({ collections, movies, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
-  return <section className="grid"><CollectionsPanel collections={collections} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact /></section>;
+function CatalogPanel({ collections, movies, loading, onCreateCollection, onUpdateCollection, onPreview, onEdit, onDelete }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreateCollection: (event: FormEvent<HTMLFormElement>) => void; onUpdateCollection: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
+  return <section className="grid"><CollectionsPanel collections={collections} movies={movies} loading={loading} onCreate={onCreateCollection} onUpdate={onUpdateCollection} /><MoviesPanel movies={movies} onPublish={() => undefined} onPreview={onPreview} onEdit={onEdit} onDelete={onDelete} compact /></section>;
 }
 
-function CollectionsPanel({ collections }: { collections: RecordItem[] }) {
-  return <article className="panel"><div className="panelhead"><div><h2>Collections</h2><p>{collections.length} rails configured</p></div></div><div className="rows">{collections.map((row) => <div className="row" key={String(row.id)}><div><b>{String(row.name ?? "Untitled")}</b><small>{String(row.slug ?? "")} - {row.published ? "Published" : "Draft"}</small></div><em>{count(row.items)} items</em></div>)}</div></article>;
+function CollectionsPanel({ collections, movies, loading, onCreate, onUpdate }: { collections: RecordItem[]; movies: RecordItem[]; loading: boolean; onCreate: (event: FormEvent<HTMLFormElement>) => void; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+  return (
+    <article className="panel folders">
+      <div className="panelhead"><div><h2>Folders / Collections</h2><p>Create Android home sections and organize published videos.</p></div><b>{collections.length} folders</b></div>
+      <form className="folderform" onSubmit={onCreate}>
+        <label>New folder name<input name="name" placeholder="Action, Kids, Drama..." required maxLength={120} /></label>
+        <label>Sort order<input name="sortOrder" type="number" defaultValue={collections.length + 1} /></label>
+        <label className="toggle"><input name="published" type="checkbox" defaultChecked /> Show in Android app</label>
+        <MovieChecklist movies={movies} />
+        <button className="primary" disabled={loading}>Create folder</button>
+      </form>
+      <div className="folderlist">
+        {collections.map((collection) => <CollectionEditor key={String(collection.id)} collection={collection} movies={movies} loading={loading} onUpdate={onUpdate} />)}
+      </div>
+    </article>
+  );
+}
+
+function CollectionEditor({ collection, movies, loading, onUpdate }: { collection: RecordItem; movies: RecordItem[]; loading: boolean; onUpdate: (collection: RecordItem, event: FormEvent<HTMLFormElement>) => void }) {
+  const selected = collectionMovieIds(collection);
+  return (
+    <form className="foldercard" onSubmit={(event) => onUpdate(collection, event)}>
+      <div className="panelhead"><div><h3>{String(collection.name ?? "Untitled folder")}</h3><p>{String(collection.slug ?? "")} - {collection.published ? "Visible in Android" : "Draft/hidden"} - {count(collection.items)} videos</p></div><button disabled={loading}>Save folder</button></div>
+      <div className="folderfields">
+        <label>Name<input name="name" required maxLength={120} defaultValue={String(collection.name ?? "")} /></label>
+        <label>Sort<input name="sortOrder" type="number" defaultValue={Number(collection.sortOrder ?? 0)} /></label>
+        <label className="toggle"><input name="published" type="checkbox" defaultChecked={Boolean(collection.published)} /> Show in Android app</label>
+      </div>
+      <MovieChecklist movies={movies} selected={selected} />
+    </form>
+  );
+}
+
+function MovieChecklist({ movies, selected = new Set<string>() }: { movies: RecordItem[]; selected?: Set<string> }) {
+  const published = movies.filter((movie) => movie.status === "PUBLISHED");
+  if (!published.length) return <div className="formnote">Publish videos first, then add them to folders.</div>;
+  return <div className="checkgrid">{published.map((movie) => <label key={String(movie.id)}><input name="movieIds" type="checkbox" value={String(movie.id)} defaultChecked={selected.has(String(movie.id))} /> <span>{String(movie.title ?? "Untitled")}</span></label>)}</div>;
 }
 
 function SeriesPanel({ series }: { series: RecordItem[] }) {
@@ -404,8 +488,18 @@ function authHeaders(): Record<string, string> {
 function csrfHeaders(): Record<string, string> {
   return { ...authHeaders(), "x-csrf-token": sessionStorage.getItem("ss_csrf") ?? "" };
 }
+function collectionPayload(formData: FormData) {
+  const movieIds = formData.getAll("movieIds").map(String).filter(Boolean);
+  return {
+    name: String(formData.get("name") ?? "").trim(),
+    published: formData.get("published") === "on",
+    sortOrder: Number(formData.get("sortOrder") || 0),
+    items: movieIds.map((movieId, index) => ({ movieId, sortOrder: index })),
+  };
+}
 function asArray(value: unknown): RecordItem[] { return Array.isArray(value) ? value as RecordItem[] : []; }
 function firstAsset(movie: RecordItem): RecordItem | null { return asArray(movie.assets)[0] ?? null; }
+function collectionMovieIds(collection: RecordItem) { return new Set(asArray(collection.items).map((item) => String(item.movieId ?? (item.movie as RecordItem | undefined)?.id ?? "")).filter(Boolean)); }
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
 function format(value: unknown) { if (value === null || value === undefined) return ""; if (typeof value === "object") return JSON.stringify(value); return String(value); }
