@@ -113,3 +113,14 @@ Suggested UI copy:
 - Blocked action message: `Internet connection required for this action.`
 
 Important security note: app-private storage hides videos from normal File Explorer and Gallery apps. It is not the same as full DRM. A rooted phone or device backup tooling may still access app-private files. For stronger protection later, add encrypted local storage or Widevine offline licenses.
+
+## Online Play Now playback
+
+For online streaming, call `POST /playback/sessions` and use the returned `manifestUrl` exactly as returned.
+
+Required behavior:
+
+- `manifestUrl` is a full HTTPS URL. Do not prepend the API base URL again.
+- Pass the returned `headers` into the Media3/ExoPlayer HTTP data source.
+- If playback fails after `POST /playback/sessions` returns 200, log the player error code/message, not the playback token.
+- Do not fall back to local offline file unless the user tapped Play Offline.
