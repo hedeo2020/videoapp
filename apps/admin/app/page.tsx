@@ -302,13 +302,15 @@ function Dashboard({ admin }: { admin: Admin }) {
 
   async function createUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
     setLoading(true);
     setNotice("");
     try {
-      const response = await fetch(`${API}/admin/users`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify(userPayload(new FormData(event.currentTarget), true)) });
+      const response = await fetch(`${API}/admin/users`, { method: "POST", credentials: "include", headers: { "content-type": "application/json", ...csrfHeaders() }, body: JSON.stringify(userPayload(new FormData(form), true)) });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error?.message ?? "User creation failed");
-      event.currentTarget.reset();
+      if (payload?.id) setData((current) => ({ ...current, users: [payload, ...asArray(current.users).filter((user) => user.id !== payload.id)] }));
+      form.reset();
       setNotice("User created.");
       await load("Users");
     } catch (error) {
