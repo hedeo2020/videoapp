@@ -103,6 +103,7 @@ function Dashboard({ admin }: { admin: Admin }) {
       if (["Overview", "Series"].includes(tab)) await get("series", "/admin/series");
       if (["Overview", "Collections", "Catalog"].includes(tab)) await get("collections", "/admin/collections");
       if (["Overview", "Processing"].includes(tab)) await get("processing", "/admin/processing/jobs");
+      if (tab === "Overview") await get("system", "/admin/system-status");
       if (tab === "Users") await get("users", "/admin/users");
       if (tab === "Playback sessions") await get("playback", "/admin/playback-sessions");
       if (tab === "Audit logs") await get("audit", "/admin/audit-logs");
@@ -334,12 +335,44 @@ function Overview({ metrics, data }: { metrics: string[][]; data: Record<string,
   return (
     <>
       <section className="metrics">{metrics.map(([label, value, trend]) => <article key={label}><small>{label}</small><strong>{value}</strong><em>{trend}</em></article>)}</section>
+      <SystemStatusPanel system={data.system as RecordItem | undefined} />
       <section className="grid">
         <JsonPanel title="Queue snapshot" value={data.processing} />
         <JsonPanel title="Recent catalog" value={{ videos: count(data.movies), collections: count(data.collections), series: count(data.series) }} />
       </section>
     </>
   );
+}
+
+function SystemStatusPanel({ system }: { system?: RecordItem }) {
+  const memory = (system?.memory ?? {}) as RecordItem;
+  const storage = (system?.storage ?? {}) as RecordItem;
+  const cpu = (system?.cpu ?? {}) as RecordItem;
+  const host = (system?.host ?? {}) as RecordItem;
+  const network = (system?.network ?? {}) as RecordItem;
+  const interfaces = asArray(network.interfaces);
+  return (
+    <article className="panel systempanel">
+      <div className="panelhead"><div><h2>System status</h2><p>Live API server health, storage, and network snapshot.</p></div><b>{system?.checkedAt ? formatDate(system.checkedAt) : "Waiting"}</b></div>
+      <div className="systemgrid">
+        <StatusGauge label="Memory" value={percent(memory.usedPercent)} detail={`${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}`} />
+        <StatusGauge label="Storage" value={percent(storage.usedPercent)} detail={`${formatBytes(storage.usedBytes)} / ${formatBytes(storage.totalBytes)}`} note={String(storage.path ?? "")} />
+        <StatusGauge label="CPU load" value={cpuLoadPercent(cpu)} detail={`${Number(cpu.cores ?? 0)} cores - load ${formatLoad(cpu.loadAverage)}`} />
+        <div className="statuscard">
+          <small>Network</small>
+          <strong>{Number(network.interfaceCount ?? interfaces.length)}</strong>
+          <em>active interfaces</em>
+          <div className="networklist">{interfaces.slice(0, 4).map((item, index) => <span key={`${String(item.name)}-${index}`}>{String(item.name)} · {String(item.family)} · {String(item.address)}</span>)}</div>
+        </div>
+      </div>
+      <div className="systemmeta"><span>Host: {String(host.hostname ?? "unknown")}</span><span>Platform: {String(host.platform ?? "")} {String(host.arch ?? "")}</span><span>Uptime: {formatDuration(Number(host.uptimeSeconds ?? 0))}</span></div>
+    </article>
+  );
+}
+
+function StatusGauge({ label, value, detail, note }: { label: string; value: number; detail: string; note?: string }) {
+  const safe = Math.max(0, Math.min(100, Math.round(value)));
+  return <div className="statuscard"><small>{label}</small><strong>{safe}%</strong><div className="statusbar"><i style={{ width: `${safe}%` }} /></div><em>{detail}</em>{note && <span>{note}</span>}</div>;
 }
 
 function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, uploadPhase, onUpload, onPublish, onPreview, onEdit, onDelete }: { movies: RecordItem[]; uploading: boolean; uploadProgress: number | null; conversionProgress: number | null; uploadPhase: string; onUpload: (event: FormEvent<HTMLFormElement>) => void; onPublish: (id: string) => void; onPreview: (movie: RecordItem) => void; onEdit: (movie: RecordItem) => void; onDelete: (movie: RecordItem) => void }) {
@@ -586,6 +619,12 @@ function folderLabel(collection: RecordItem) { return `${String((collection.pare
 function count(value: unknown) { return String(Array.isArray(value) ? value.length : 0); }
 function jobsTotal(value: unknown) { const job = value as Record<string, number> | undefined; return String((job?.waiting ?? 0) + (job?.active ?? 0) + (job?.failed ?? 0)); }
 function format(value: unknown) { if (value === null || value === undefined) return ""; if (typeof value === "object") return JSON.stringify(value); return String(value); }
+function percent(value: unknown) { const number = Number(value ?? 0); return Number.isFinite(number) ? number : 0; }
+function formatBytes(value: unknown) { const bytes = Number(value ?? 0); if (!Number.isFinite(bytes) || bytes <= 0) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024))); return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`; }
+function formatLoad(value: unknown) { return Array.isArray(value) ? value.map((item) => Number(item).toFixed(2)).join(" / ") : "0.00"; }
+function cpuLoadPercent(cpu: RecordItem) { const cores = Number(cpu.cores ?? 1) || 1; const firstLoad = Array.isArray(cpu.loadAverage) ? Number(cpu.loadAverage[0] ?? 0) : 0; return Math.min(100, Math.round((firstLoad / cores) * 100)); }
+function formatDuration(seconds: number) { const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); const minutes = Math.floor((seconds % 3600) / 60); return `${days ? `${days}d ` : ""}${hours}h ${minutes}m`; }
+function formatDate(value: unknown) { const date = new Date(String(value)); return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(); }
 function panelSubtitle(tab: Tab) {
   const labels: Record<Tab, string> = {
     Overview: "Platform snapshot and quick actions.",

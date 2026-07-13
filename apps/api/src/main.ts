@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, stat, unlink } from "node:fs/promises";
+import { mkdir, stat, statfs, unlink } from "node:fs/promises";
+import os from "node:os";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -102,6 +103,7 @@ app.get("/api/v1/admin/audit-logs",{preHandler:requirePermission("audit:read")},
 app.get("/api/v1/admin/security-events",{preHandler:requirePermission("settings:security")},async()=>prisma.securityEvent.findMany({orderBy:{createdAt:"desc"},take:100}));
 app.get("/api/v1/admin/playback-sessions",{preHandler:requirePermission("audit:read")},async()=>prisma.playbackSession.findMany({orderBy:{createdAt:"desc"},take:100,include:{user:{select:{email:true,displayName:true}},videoAsset:{include:{movie:true,episode:true}}}}));
 app.get("/api/v1/admin/settings",{preHandler:requirePermission("settings:security")},async()=>({registrationEnabled:config.REGISTRATION_ENABLED,maxConcurrentStreams:config.MAX_CONCURRENT_STREAMS,drmProvider:config.DRM_PROVIDER,widevineConfigured:Boolean(config.WIDEVINE_LICENSE_URL&&config.WIDEVINE_PROVIDER_API_KEY),storageRoot}));
+app.get("/api/v1/admin/system-status",{preHandler:requirePermission("audit:read")},async()=>{const memoryTotal=os.totalmem();const memoryFree=os.freemem();const storage=await statfs(storageRoot).catch(()=>undefined);const storageTotal=storage?storage.blocks*storage.bsize:0;const storageFree=storage?storage.bavail*storage.bsize:0;const network=Object.entries(os.networkInterfaces()).flatMap(([name,addresses])=>(addresses??[]).filter(address=>!address.internal).map(address=>({name,family:address.family,address:address.address,mac:address.mac})));return {checkedAt:new Date().toISOString(),host:{hostname:os.hostname(),platform:os.platform(),arch:os.arch(),uptimeSeconds:Math.round(os.uptime()),processUptimeSeconds:Math.round(process.uptime())},cpu:{cores:os.cpus().length,loadAverage:os.loadavg()},memory:{totalBytes:memoryTotal,freeBytes:memoryFree,usedBytes:memoryTotal-memoryFree,usedPercent:memoryTotal?Math.round(((memoryTotal-memoryFree)/memoryTotal)*100):0},storage:{path:storageRoot,totalBytes:storageTotal,freeBytes:storageFree,usedBytes:Math.max(0,storageTotal-storageFree),usedPercent:storageTotal?Math.round(((storageTotal-storageFree)/storageTotal)*100):0},network:{interfaceCount:network.length,interfaces:network}}});
 
 app.get("/api/v1/admin/movies",{preHandler:requirePermission("catalog:write")},async()=>prisma.movie.findMany({orderBy:{updatedAt:"desc"},include:{assets:true},take:100}));
 app.post("/api/v1/admin/movies",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const body=catalogBody.parse(req.body);const movie=await prisma.movie.create({data:{...body,slug:body.slug??slugify(body.title)}});await audit(req as AuthRequest,"MOVIE_CREATED","MOVIE",movie.id,{title:movie.title});return reply.code(201).send(movie)});
