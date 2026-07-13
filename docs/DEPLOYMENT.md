@@ -6,6 +6,8 @@ If Coolify is configured as a single Dockerfile resource, the root `Dockerfile` 
 
 To deploy the admin console as its own Coolify Dockerfile resource, keep the base directory as `/`, set the Dockerfile location to `apps/admin/Dockerfile`, expose port `3000`, and set `NEXT_PUBLIC_API_URL` to the public API URL ending in `/api/v1`. Because Next.js embeds public variables at build time, redeploy the admin app after changing `NEXT_PUBLIC_API_URL`.
 
+For one-day idle login sessions, set `ACCESS_TOKEN_TTL_SECONDS=86400` on the API service in Coolify. This controls viewer access tokens plus the admin secure cookie lifetime. Keep `REFRESH_TOKEN_TTL_DAYS=30` or higher for mobile refresh sessions. If you want playback grants to last longer while a user watches, set `PLAYBACK_SESSION_TTL_SECONDS=3600` or another value up to `86400`.
+
 Run database migrations before switching traffic. Create the first administrator with `pnpm --filter @securestream/api admin:create`; never retain bootstrap credentials in the environment. Back up PostgreSQL with `pg_dump --format=custom`, back up object storage using provider versioning/replication, and test `pg_restore` in an isolated database. Roll back by restoring the prior image tags and applying only a migration explicitly documented as reversible.
 
 A small Ampere VPS is appropriate for development and limited early use, not Netflix-scale traffic or large-scale concurrent transcoding. Keep worker concurrency at one and move storage, processing, Redis, and PostgreSQL to dedicated services as usage grows.
