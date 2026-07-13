@@ -32,6 +32,7 @@ export function toMovieCard(movie: CatalogMovie) {
     durationSeconds,
     durationMinutes,
     durationText: durationMinutes ? `${durationMinutes}m` : null,
+    offlineAvailable: true,
   };
 }
 
