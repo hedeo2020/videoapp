@@ -26,7 +26,7 @@ For Coolify, use `docker-compose.coolify.yml` when you want a simpler resource l
 
 Original assets are private, playback grants are short-lived and scoped, access is server-authorized, sensitive logs are redacted, and protected Android windows use `FLAG_SECURE`. Production protected titles require a legitimate Widevine DRM provider. Development HLS is non-DRM and is not a substitute. Rooted devices and external cameras can still capture video; see [the threat model](docs/THREAT_MODEL.md).
 
-Architecture and milestones are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). OCI/Coolify operations are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The complete portable install/migration guide is in [docs/PORTABLE_PACKAGE.md](docs/PORTABLE_PACKAGE.md), the step-by-step Coolify guide is in [docs/COOLIFY_INSTALLATION.md](docs/COOLIFY_INSTALLATION.md), and the Google AI Studio Android builder guide is in [docs/ANDROID_AI_STUDIO_BUILDER.md](docs/ANDROID_AI_STUDIO_BUILDER.md).
+Architecture and milestones are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). OCI/Coolify operations are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The complete portable install/migration guide is in [docs/PORTABLE_PACKAGE.md](docs/PORTABLE_PACKAGE.md), the separate Coolify resources guide is in [docs/COOLIFY_SEPARATE_RESOURCES.md](docs/COOLIFY_SEPARATE_RESOURCES.md), the Compose-style Coolify guide is in [docs/COOLIFY_INSTALLATION.md](docs/COOLIFY_INSTALLATION.md), and the Google AI Studio Android builder guide is in [docs/ANDROID_AI_STUDIO_BUILDER.md](docs/ANDROID_AI_STUDIO_BUILDER.md).
 
 ## Identity API
 

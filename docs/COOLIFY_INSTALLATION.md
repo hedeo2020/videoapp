@@ -2,6 +2,16 @@
 
 This guide is for installing SecureStream on a VPS using Coolify.
 
+Important:
+
+If you want Coolify to show separate cards under `Applications` and `Databases`, do not use this Compose guide. Use:
+
+```text
+docs/COOLIFY_SEPARATE_RESOURCES.md
+```
+
+Docker Compose deployments are grouped by Coolify into one Compose application card. That is normal Coolify behavior and cannot be changed from inside a Compose file.
+
 Use this when you want the full platform running in Coolify:
 
 - API
