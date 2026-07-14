@@ -163,17 +163,25 @@ Add these to the API application environment variables.
 
 Use your real Coolify database URLs from Step 2 and Step 3.
 
+This block includes every variable from `.env.production.example`.
+
 ```env
 NODE_ENV=production
 PRODUCT_NAME=SecureStream
 
+# Database and queue
+POSTGRES_USER=securestream
+POSTGRES_PASSWORD=YOUR_POSTGRES_PASSWORD
+POSTGRES_DB=securestream
 DATABASE_URL=postgresql://securestream:YOUR_POSTGRES_PASSWORD@YOUR_POSTGRES_INTERNAL_HOST:5432/securestream
 REDIS_URL=redis://YOUR_REDIS_INTERNAL_HOST:6379
 
-JWT_ACCESS_SECRET=CHANGE_THIS_TO_32_PLUS_RANDOM_CHARS
-JWT_REFRESH_SECRET=CHANGE_THIS_TO_ANOTHER_32_PLUS_RANDOM_CHARS
-PLAYBACK_SIGNING_SECRET=CHANGE_THIS_TO_ANOTHER_32_PLUS_RANDOM_CHARS
+# Required independent 32+ character secrets. Do not reuse one value for all three.
+JWT_ACCESS_SECRET=CHANGE_ME_32_PLUS_RANDOM_CHARACTERS_ACCESS
+JWT_REFRESH_SECRET=CHANGE_ME_32_PLUS_RANDOM_CHARACTERS_REFRESH
+PLAYBACK_SIGNING_SECRET=CHANGE_ME_32_PLUS_RANDOM_CHARACTERS_PLAYBACK
 
+# Login/session behavior
 ACCESS_TOKEN_TTL_SECONDS=86400
 REFRESH_TOKEN_TTL_DAYS=30
 EMAIL_TOKEN_TTL_MINUTES=30
@@ -183,13 +191,17 @@ PLAYBACK_SESSION_TTL_SECONDS=3600
 REGISTRATION_ENABLED=true
 MAX_CONCURRENT_STREAMS=2
 
+# Public URLs for the server where you deploy.
+# Change these when moving to a new domain/port.
 ADMIN_ORIGIN=https://admin.yourdomain.com
 API_PUBLIC_URL=https://api.yourdomain.com
 NEXT_PUBLIC_API_URL=https://api.yourdomain.com/api/v1
 
+# Persistent media storage. Mount this path as a persistent volume.
 STORAGE_DRIVER=local
 STORAGE_LOCAL_ROOT=/data/media
 
+# Upload/conversion behavior
 WORKER_CONCURRENCY=1
 FFMPEG_THREADS=2
 FFMPEG_PRESET=veryfast
@@ -201,16 +213,34 @@ MAX_UPLOAD_FILES=20
 TEMP_PROCESSING_DIR=/data/tmp
 TEMP_STORAGE_MIN_FREE_BYTES=5368709120
 
+# Optional S3-compatible storage placeholders. Current deployment uses local persistent storage.
+S3_ENDPOINT=
+S3_BUCKET=
+S3_REGION=
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+
+# DRM. Keep development unless you have a real Widevine provider.
 DRM_PROVIDER=development
 WIDEVINE_LICENSE_URL=
 WIDEVINE_PROVIDER_API_KEY=
 
+# Optional backup upload to Google Drive.
+# GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON can be raw JSON or base64 JSON.
 GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON=
 GOOGLE_DRIVE_FOLDER_ID=
+
+# Optional alerts. Any configured target receives backup/test/system alerts.
 DISCORD_WEBHOOK_URL=
 ALERT_WEBHOOK_URL=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+
+# Optional one-time bootstrap admin creation.
+# Remove after running: pnpm --filter @securestream/api admin:create
+BOOTSTRAP_ADMIN_EMAIL=
+BOOTSTRAP_ADMIN_NAME=
+BOOTSTRAP_ADMIN_PASSWORD=
 ```
 
 For your current domains, use:
