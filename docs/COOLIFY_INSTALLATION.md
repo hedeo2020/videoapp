@@ -219,6 +219,8 @@ redis
 
 The API container automatically runs Prisma migrations before starting. In the Coolify-friendly setup, it also starts the background video worker inside the same API container.
 
+The API health check has a startup grace period because first boot can take extra time while migrations and worker startup finish.
+
 ## Step 6: Create the first admin account
 
 Open the Coolify terminal for the `api` container.
