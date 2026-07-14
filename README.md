@@ -20,6 +20,8 @@ For automated initial deployment, provide `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_AD
 
 The Android app uses `http://10.0.2.2:4000` from an emulator. Build it on a developer machine or CI, never on the production VPS.
 
+For Coolify, use `docker-compose.coolify.yml` when you want a simpler resource list: API, admin, PostgreSQL, and Redis. The background video worker runs inside the API container in that setup.
+
 ## Security stance
 
 Original assets are private, playback grants are short-lived and scoped, access is server-authorized, sensitive logs are redacted, and protected Android windows use `FLAG_SECURE`. Production protected titles require a legitimate Widevine DRM provider. Development HLS is non-DRM and is not a substitute. Rooted devices and external cameras can still capture video; see [the threat model](docs/THREAT_MODEL.md).

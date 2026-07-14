@@ -6,34 +6,39 @@ Use this when you want the full platform running in Coolify:
 
 - API
 - Admin panel
-- Worker
 - PostgreSQL
 - Redis
+- Background video worker bundled inside the API container
 - Persistent media storage
 
 ## Recommended Coolify setup
 
 Use Coolify's Docker Compose app/resource, not a single Dockerfile app.
 
+Recommended Compose file for Coolify:
+
+```text
+docker-compose.coolify.yml
+```
+
 Why:
 
-- The full platform needs multiple services.
-- PostgreSQL and Redis are included in `docker-compose.yml`.
-- The API, admin, and worker must share the same environment.
-- The API and worker must share persistent media storage.
+- Coolify shows a simpler deployment: API, admin, PostgreSQL, and Redis.
+- The video worker still runs, but it is bundled inside the API container.
+- PostgreSQL and Redis are included in the same Compose file.
+- The API and worker logic share the same persistent media storage automatically.
 
 Very important:
 
-If Coolify shows only one service/resource named `api`, you did not deploy the full Compose stack. You probably deployed the root `Dockerfile`. That Dockerfile runs API only and will not create PostgreSQL, Redis, admin, or worker.
+If Coolify shows only one service/resource named `api`, you did not deploy the Compose stack. You probably deployed the root `Dockerfile`. That Dockerfile runs API only and will not create PostgreSQL, Redis, or the admin panel.
 
-For the full platform, Coolify must show these services inside the same Compose deployment:
+For the recommended Coolify setup, Coolify should show these services inside the same Compose deployment:
 
 ```text
 postgres
 redis
 api
 admin
-worker
 ```
 
 If you only see `api`, delete that resource and create a new Docker Compose resource instead.
@@ -54,12 +59,13 @@ API service   -> port 4000 -> https://api.yourdomain.com
 Admin service -> port 3000 -> https://admin.yourdomain.com
 ```
 
+The Coolify Compose file uses internal container ports only. It does not bind host ports `3000` or `4000` on the VPS, so it avoids conflicts if those ports are already used by another service.
+
 Do not expose these publicly:
 
 ```text
 postgres -> 5432
 redis    -> 6379
-worker   -> no public port
 ```
 
 ## Step 1: Create a new Coolify resource
@@ -84,14 +90,19 @@ main
 6. Compose file:
 
 ```text
-docker-compose.yml
+docker-compose.coolify.yml
 ```
 
 If Coolify asks for a Dockerfile path, you are in the wrong resource type. Go back and choose Docker Compose.
 
-If Coolify allows a production override file, also add:
+Do not add `docker-compose.production.yml` when using `docker-compose.coolify.yml`. The Coolify file already includes production restart policies and health checks.
+
+Advanced/manual option:
+
+If you specifically want a separate worker container, use:
 
 ```text
+docker-compose.yml
 docker-compose.production.yml
 ```
 
@@ -143,11 +154,11 @@ Important:
 
 Coolify note:
 
-When PostgreSQL and Redis are created through `docker-compose.yml`, they may not appear under Coolify's separate `Databases` page. They are Compose services inside the same deployment. Check them under the deployment's services/containers/logs instead.
+When PostgreSQL and Redis are created through Compose, they may not appear under Coolify's separate `Databases` page. They are Compose services inside the same deployment. Check them under the deployment's services/containers/logs instead.
 
 ## Step 3: Persistent storage
 
-In Coolify, add persistent storage for the API and worker.
+In Coolify, add persistent storage for the API service.
 
 Recommended mount:
 
@@ -191,7 +202,7 @@ Port: 3000
 Domain: https://admin.yourdomain.com
 ```
 
-PostgreSQL, Redis, and worker should not have public domains.
+PostgreSQL and Redis should not have public domains.
 
 ## Step 5: Deploy
 
@@ -202,12 +213,11 @@ Watch logs for:
 ```text
 api
 admin
-worker
 postgres
 redis
 ```
 
-The API container automatically runs Prisma migrations before starting.
+The API container automatically runs Prisma migrations before starting. In the Coolify-friendly setup, it also starts the background video worker inside the same API container.
 
 ## Step 6: Create the first admin account
 
@@ -392,7 +402,7 @@ P1000: Authentication failed against database server
 
 then the API can reach PostgreSQL, but the PostgreSQL password does not match `DATABASE_URL`.
 
-First check the Coolify service list. If the deployment only has `api`, this is not a password problem. It means the full Compose stack was not deployed. Recreate the resource as Docker Compose so `postgres`, `redis`, `api`, `admin`, and `worker` are all created together.
+First check the Coolify service list. If the deployment only has `api`, this is not a password problem. It means the Compose stack was not deployed. Recreate the resource as Docker Compose using `docker-compose.coolify.yml` so `postgres`, `redis`, `api`, and `admin` are created together.
 
 Check these four values in Coolify:
 
@@ -429,9 +439,10 @@ Fix:
 
 ```text
 API mount path: /data
-Worker mount path: /data
 STORAGE_LOCAL_ROOT=/data/media
 ```
+
+In the recommended Coolify setup, the worker runs inside the API container, so one persistent `/data` mount on the API service is enough.
 
 ### Android catalog loads but playback fails
 
@@ -473,7 +484,7 @@ Settings -> Test alert
 - `api` exposes port `4000`.
 - `admin` exposes port `3000`.
 - PostgreSQL and Redis are private.
-- API and worker have persistent `/data`.
+- API has persistent `/data`.
 - `.env.production.example` values were copied and edited.
 - Three JWT/playback secrets are unique and 32+ characters.
 - `ADMIN_ORIGIN` matches the admin domain exactly.

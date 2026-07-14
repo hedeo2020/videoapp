@@ -129,16 +129,18 @@ Recommended service domains:
 In Coolify:
 
 1. Import this GitHub repo.
-2. Use `docker-compose.yml`.
-3. Add `docker-compose.production.yml` as the production override if supported.
+2. Use `docker-compose.coolify.yml`.
+3. Do not add a production override file for this Coolify setup.
 4. Add every variable from `.env.production.example`.
-5. Set persistent storage for the API and worker at:
+5. Set persistent storage for the API at:
 
 ```text
-/data/media
+/data
 ```
 
 6. Redeploy after every URL/env change.
+
+This Coolify setup shows four services: `api`, `admin`, `postgres`, and `redis`. The background video worker runs inside the API container.
 
 If deploying admin as a separate Dockerfile resource:
 
