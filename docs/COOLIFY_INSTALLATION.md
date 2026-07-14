@@ -364,6 +364,43 @@ NEXT_PUBLIC_API_URL=https://api.yourdomain.com/api/v1
 
 Then rebuild/redeploy admin.
 
+### API exits after repeated restarts with Prisma P1000
+
+If API logs show:
+
+```text
+P1000: Authentication failed against database server
+```
+
+then the API can reach PostgreSQL, but the PostgreSQL password does not match `DATABASE_URL`.
+
+Check these four values in Coolify:
+
+```env
+POSTGRES_USER=securestream
+POSTGRES_PASSWORD=your-password
+POSTGRES_DB=securestream
+DATABASE_URL=postgresql://securestream:your-password@postgres:5432/securestream
+```
+
+The password in `POSTGRES_PASSWORD` and `DATABASE_URL` must be exactly the same.
+
+If this is a fresh install with no data, the fastest fix is:
+
+1. Delete the deployment/resource.
+2. Delete its PostgreSQL persistent volume/storage too.
+3. Create the resource again.
+4. Redeploy from the latest `main` branch.
+
+If it still fails, test with the default local password once:
+
+```env
+POSTGRES_PASSWORD=securestream
+DATABASE_URL=postgresql://securestream:securestream@postgres:5432/securestream
+```
+
+If that works, the old PostgreSQL volume was initialized with the default password and was not actually deleted.
+
 ### Upload succeeds but video disappears after redeploy
 
 Persistent storage is missing or mounted to the wrong path.
