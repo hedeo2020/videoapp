@@ -91,6 +91,9 @@ Minimum required values:
 
 ```env
 NODE_ENV=production
+POSTGRES_USER=securestream
+POSTGRES_PASSWORD=YOUR_DB_PASSWORD
+POSTGRES_DB=securestream
 DATABASE_URL=postgresql://securestream:YOUR_DB_PASSWORD@postgres:5432/securestream
 REDIS_URL=redis://redis:6379
 JWT_ACCESS_SECRET=CHANGE_THIS_TO_32_PLUS_RANDOM_CHARS
@@ -115,9 +118,14 @@ TEMP_STORAGE_MIN_FREE_BYTES=5368709120
 
 Important:
 
+- `POSTGRES_PASSWORD` and the password inside `DATABASE_URL` must be exactly the same.
 - Use three different secret values.
 - Each secret must be 32+ random characters.
 - Do not use the sample values in production.
+
+Coolify note:
+
+When PostgreSQL and Redis are created through `docker-compose.yml`, they may not appear under Coolify's separate `Databases` page. They are Compose services inside the same deployment. Check them under the deployment's services/containers/logs instead.
 
 ## Step 3: Persistent storage
 

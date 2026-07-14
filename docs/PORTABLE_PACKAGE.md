@@ -64,6 +64,9 @@ cp .env.production.example .env
 Required values:
 
 ```env
+POSTGRES_USER=securestream
+POSTGRES_PASSWORD=YOUR_DB_PASSWORD
+POSTGRES_DB=securestream
 DATABASE_URL=postgresql://securestream:YOUR_DB_PASSWORD@postgres:5432/securestream
 REDIS_URL=redis://redis:6379
 JWT_ACCESS_SECRET=32-plus-random-characters
@@ -74,6 +77,8 @@ API_PUBLIC_URL=https://your-api-domain.com
 NEXT_PUBLIC_API_URL=https://your-api-domain.com/api/v1
 STORAGE_LOCAL_ROOT=/data/media
 ```
+
+`POSTGRES_PASSWORD` and the password inside `DATABASE_URL` must match.
 
 Important: `NEXT_PUBLIC_API_URL` is embedded into the admin build. If you change API domain later, rebuild/redeploy the admin service.
 
