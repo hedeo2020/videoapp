@@ -7,5 +7,6 @@ dist
 .gradle
 local.properties
 apps/android/app/build
+apps/android/build
 coverage
 tmp
