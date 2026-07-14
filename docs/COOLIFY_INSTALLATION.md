@@ -22,6 +22,22 @@ Why:
 - The API, admin, and worker must share the same environment.
 - The API and worker must share persistent media storage.
 
+Very important:
+
+If Coolify shows only one service/resource named `api`, you did not deploy the full Compose stack. You probably deployed the root `Dockerfile`. That Dockerfile runs API only and will not create PostgreSQL, Redis, admin, or worker.
+
+For the full platform, Coolify must show these services inside the same Compose deployment:
+
+```text
+postgres
+redis
+api
+admin
+worker
+```
+
+If you only see `api`, delete that resource and create a new Docker Compose resource instead.
+
 ## Domains
 
 Prepare two domains or subdomains:
@@ -52,7 +68,7 @@ In Coolify:
 
 1. Go to your Project.
 2. Click New Resource.
-3. Choose Docker Compose.
+3. Choose Docker Compose. Do not choose Dockerfile, Nixpacks, or App.
 4. Connect the GitHub repository:
 
 ```text
@@ -70,6 +86,8 @@ main
 ```text
 docker-compose.yml
 ```
+
+If Coolify asks for a Dockerfile path, you are in the wrong resource type. Go back and choose Docker Compose.
 
 If Coolify allows a production override file, also add:
 
@@ -373,6 +391,8 @@ P1000: Authentication failed against database server
 ```
 
 then the API can reach PostgreSQL, but the PostgreSQL password does not match `DATABASE_URL`.
+
+First check the Coolify service list. If the deployment only has `api`, this is not a password problem. It means the full Compose stack was not deployed. Recreate the resource as Docker Compose so `postgres`, `redis`, `api`, `admin`, and `worker` are all created together.
 
 Check these four values in Coolify:
 
