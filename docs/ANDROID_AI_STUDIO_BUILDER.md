@@ -4,6 +4,30 @@ Use this guide when building or updating the Android viewer app in Google AI Stu
 
 The Android app is viewer-only. Do not add admin upload, admin user management, backup, or server settings features to Android.
 
+## Import the GitHub repo first
+
+In Google AI Studio:
+
+1. Import/connect this GitHub repository:
+
+```text
+https://github.com/hedeo2020/videoapp.git
+```
+
+2. Use branch:
+
+```text
+main
+```
+
+3. Android project folder:
+
+```text
+apps/android
+```
+
+4. After AI Studio loads the repo, paste the API URL setup script below.
+
 ## API base URL
 
 AI Studio will not automatically know your API URL.
@@ -29,6 +53,66 @@ Important playback rule:
 When `POST /playback/sessions` returns `manifestUrl`, use `manifestUrl` exactly as returned.
 
 Do not prepend `API_BASE_URL` to `manifestUrl`.
+
+## Copy-ready script to set the API URL after importing the repo
+
+Paste this into Google AI Studio after it imports the GitHub repo:
+
+```text
+Update the Android app API base URL.
+
+Project folder:
+apps/android
+
+Production API base URL:
+https://api.3dbpoint.com/api/v1
+
+Tasks:
+
+1. Find the Android networking/config file that stores the API base URL.
+2. If no single config exists, create one Kotlin config object, for example:
+
+   package com.securestream.viewer
+
+   object AppConfig {
+       const val API_BASE_URL = "https://api.3dbpoint.com/api/v1"
+   }
+
+3. Replace every hardcoded API base URL with AppConfig.API_BASE_URL.
+4. Make sure Retrofit/OkHttp uses AppConfig.API_BASE_URL for normal API endpoints.
+5. Keep the trailing slash handling correct. If Retrofit requires a trailing slash, use:
+
+   https://api.3dbpoint.com/api/v1/
+
+   but keep the logical API base as:
+
+   https://api.3dbpoint.com/api/v1
+
+6. Do not use the admin URL in the Android app.
+7. Do not use:
+
+   https://cpanel.3dbpoint.com
+
+8. Critical playback/download rule:
+   - Use API_BASE_URL only for normal endpoints like /auth/login, /catalog, /search, /playback/sessions, /offline/downloads.
+   - When the API returns manifestUrl, use manifestUrl exactly as returned.
+   - When the API returns downloadUrl, use downloadUrl exactly as returned.
+   - Never combine API_BASE_URL + manifestUrl.
+   - Never combine API_BASE_URL + downloadUrl.
+
+9. Keep the whole app immersive fullscreen.
+10. Keep user logged in permanently unless logout or API rejects the account/session.
+11. Do not log tokens, playback URLs, download URLs, or DRM data.
+
+After changing the URL, build the APK and test:
+
+- Login
+- Catalog load
+- Search
+- Play Now
+- Download offline
+- Reopen app and confirm login remains
+```
 
 ## Copy-ready AI Studio prompt
 
