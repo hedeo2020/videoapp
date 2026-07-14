@@ -27,6 +27,19 @@ Database:    securestream-redis
 
 The background video worker runs inside the API application, so you do not need a third worker application card.
 
+## Required application ports
+
+Use these exact internal application ports in Coolify:
+
+```text
+API application   -> port 4000
+Admin application -> port 3000
+```
+
+Do not set both applications to port `3000`.
+
+If the API application is set to `3000`, Coolify's proxy will point to the wrong port and the API domain can show `Bad Gateway`.
+
 ## Step 1: Delete the old Compose application
 
 If you currently have one big Compose resource, delete it.
@@ -411,3 +424,21 @@ NEXT_PUBLIC_API_URL=https://api.3dbpoint.com/api/v1
 ```
 
 Then rebuild both API and Admin.
+
+### API domain shows Bad Gateway
+
+First check the API application's port in Coolify.
+
+It must be:
+
+```text
+4000
+```
+
+The Admin application uses:
+
+```text
+3000
+```
+
+If both API and Admin are set to `3000`, fix the API application port to `4000`, save, then redeploy/restart the API application.
