@@ -1,5 +1,6 @@
 package com.example
 
+import android.graphics.Color
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -38,6 +39,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        applyVisibleSystemBars()
         setContent {
             MyApplicationTheme {
                 Surface(
@@ -62,9 +64,7 @@ class MainActivity : ComponentActivity() {
     fun exitFullscreenPlayback() {
         isPlayingVideo = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        WindowCompat.setDecorFitsSystemWindows(window, true)
-        val controller = WindowCompat.getInsetsController(window, window.decorView)
-        controller.show(WindowInsetsCompat.Type.systemBars())
+        applyVisibleSystemBars()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -73,7 +73,19 @@ class MainActivity : ComponentActivity() {
             val controller = WindowCompat.getInsetsController(window, window.decorView)
             controller.hide(WindowInsetsCompat.Type.systemBars())
             controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        } else if (hasFocus) {
+            applyVisibleSystemBars()
         }
+    }
+
+    private fun applyVisibleSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.statusBarColor = Color.BLACK
+        window.navigationBarColor = Color.BLACK
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.show(WindowInsetsCompat.Type.systemBars())
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
     }
 
     fun enterProtectedPlayback() {
