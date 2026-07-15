@@ -11,6 +11,34 @@ Use this when Google AI Studio is unavailable or you want to build the same Andr
 - Minimum SDK: `26`
 - API URL currently compiled in: `https://api.3dbpoint.com/api/v1/`
 
+## Change the Android API URL manually
+
+Edit this file:
+
+```text
+apps/android/app/src/main/java/com/example/config/AppConfig.kt
+```
+
+Change these two lines:
+
+```kotlin
+const val API_BASE_URL = "https://api.3dbpoint.com/api/v1/"
+const val WEB_BASE_URL = "https://api.3dbpoint.com"
+```
+
+Use this pattern:
+
+```kotlin
+const val API_BASE_URL = "https://YOUR-API-DOMAIN.com/api/v1/"
+const val WEB_BASE_URL = "https://YOUR-API-DOMAIN.com"
+```
+
+Important:
+
+- `API_BASE_URL` must end with `/api/v1/`
+- `WEB_BASE_URL` must not end with `/api/v1`
+- After changing this file, rebuild and reinstall the Android APK because the URL is compiled into the app.
+
 ## Requirements
 
 Install Android Studio first, then open it once so it installs:
