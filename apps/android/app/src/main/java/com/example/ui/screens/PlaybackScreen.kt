@@ -70,6 +70,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.example.MainActivity
+import com.example.config.AppConfig
 import com.example.data.api.PlaybackSessionResponse
 import com.example.ui.theme.SecureMintAccent
 import com.example.ui.theme.SecureTextWhite
@@ -158,7 +159,7 @@ fun PlaybackScreen(
 
     // Prepare and Start Playback
     LaunchedEffect(playbackSession) {
-        val origin = "https://compreface.3dbpoint.com"
+        val origin = AppConfig.WEB_BASE_URL
         val fullUrl = when {
             playbackSession.manifestUrl.startsWith("http") -> playbackSession.manifestUrl
             playbackSession.manifestUrl.startsWith("/") || playbackSession.manifestUrl.startsWith("file:") -> playbackSession.manifestUrl

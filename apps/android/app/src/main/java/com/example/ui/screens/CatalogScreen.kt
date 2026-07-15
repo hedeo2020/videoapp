@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.config.AppConfig
 import com.example.data.api.MovieCardDto
 import com.example.data.api.RailDto
 import com.example.ui.theme.SecureDarkBackground
@@ -403,7 +404,7 @@ fun normalizeImageUrl(url: String?): String? {
     if (url.isNullOrBlank()) return null
     return when {
         url.startsWith("http://") || url.startsWith("https://") -> url
-        url.startsWith("/") -> "https://compreface.3dbpoint.com$url"
+        url.startsWith("/") -> "${AppConfig.WEB_BASE_URL}$url"
         else -> url
     }
 }

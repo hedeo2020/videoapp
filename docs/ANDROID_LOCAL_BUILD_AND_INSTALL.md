@@ -9,7 +9,7 @@ Use this when Google AI Studio is unavailable or you want to build the same Andr
 - App name: `SecureStream`
 - App package: `com.aistudio.securestream.vqzklp`
 - Minimum SDK: `26`
-- API URL currently compiled in: `https://compreface.3dbpoint.com/api/v1/`
+- API URL currently compiled in: `https://api.3dbpoint.com/api/v1/`
 
 ## Requirements
 

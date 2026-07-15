@@ -1,6 +1,7 @@
 package com.example.data.api
 
 import android.content.Context
+import com.example.config.AppConfig
 import com.example.data.storage.TokenManager
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
@@ -78,7 +79,7 @@ interface SecureStreamApi {
 
 
     companion object {
-        private const val BASE_URL = "https://compreface.3dbpoint.com/api/v1/"
+        private const val BASE_URL = AppConfig.API_BASE_URL
 
         fun create(context: Context, tokenManager: TokenManager): SecureStreamApi {
             val moshi = Moshi.Builder()
