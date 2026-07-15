@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -81,6 +82,7 @@ fun CatalogScreen(
     onNavigateToDownloads: () -> Unit,
     onNavigateToDetail: (MovieCardDto) -> Unit,
     onNavigateToDashboard: () -> Unit,
+    onNavigateToAdminDashboard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val catalogState by viewModel.catalogState.collectAsState()
@@ -88,6 +90,7 @@ fun CatalogScreen(
     val downloadedVideos by viewModel.downloadedVideos.collectAsState()
     val summary by viewModel.dashboardSummary.collectAsState()
     val totalUnread = (summary?.unreadNotifications ?: 0) + (summary?.unreadMessages ?: 0)
+    val isAdmin = viewModel.isAdminUser()
 
     val offlineMovies = remember(downloadedVideos) {
         downloadedVideos.map { video ->
@@ -131,6 +134,20 @@ fun CatalogScreen(
                 },
                 actions = {
                     if (isOnline) {
+                        if (isAdmin) {
+                            IconButton(
+                                onClick = onNavigateToAdminDashboard,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("admin_dashboard_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.AdminPanelSettings,
+                                    contentDescription = "Admin Dashboard",
+                                    tint = SecureMintAccent
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = onNavigateToDashboard,
                             modifier = Modifier

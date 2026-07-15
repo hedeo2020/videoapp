@@ -171,4 +171,92 @@ data class LoginErrorResponse(
     val adminMessage: String? = null
 )
 
+@JsonClass(generateAdapter = true)
+data class AdminHostDto(
+    val hostname: String? = null,
+    val platform: String? = null,
+    val arch: String? = null,
+    val uptimeSeconds: Long? = null,
+    val processUptimeSeconds: Long? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminCpuDto(
+    val cores: Int? = null,
+    val loadAverage: List<Double>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminMemoryDto(
+    val totalBytes: Long? = null,
+    val freeBytes: Long? = null,
+    val usedBytes: Long? = null,
+    val usedPercent: Int? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminStorageDto(
+    val path: String? = null,
+    val totalBytes: Long? = null,
+    val freeBytes: Long? = null,
+    val usedBytes: Long? = null,
+    val usedPercent: Int? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminNetworkDto(
+    val interfaceCount: Int? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminSystemStatusDto(
+    val checkedAt: String? = null,
+    val host: AdminHostDto? = null,
+    val cpu: AdminCpuDto? = null,
+    val memory: AdminMemoryDto? = null,
+    val storage: AdminStorageDto? = null,
+    val network: AdminNetworkDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminUserDto(
+    val id: String,
+    val email: String,
+    val displayName: String? = null,
+    val role: String? = null,
+    val status: String? = null,
+    val accessRestricted: Boolean? = null,
+    val createdAt: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminBasicUserDto(
+    val id: String? = null,
+    val email: String? = null,
+    val displayName: String? = null,
+    val role: String? = null,
+    val status: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminConversationDto(
+    val id: String,
+    val userId: String? = null,
+    val user: AdminBasicUserDto? = null,
+    val unreadCount: Int? = null,
+    val updatedAt: String? = null,
+    val lastMessage: MessageDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminDeviceSessionDto(
+    val id: String,
+    val deviceId: String? = null,
+    val userAgent: String? = null,
+    val createdAt: String? = null,
+    val lastUsedAt: String? = null,
+    val expiresAt: String? = null,
+    val user: AdminBasicUserDto? = null
+)
+
 

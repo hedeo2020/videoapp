@@ -20,6 +20,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.example.ui.screens.CatalogScreen
+import com.example.ui.screens.AdminDashboardScreen
 import com.example.ui.screens.DashboardScreen
 import com.example.ui.screens.DetailScreen
 import com.example.ui.screens.DownloadsScreen
@@ -134,7 +135,15 @@ fun SecureStreamApp(viewModel: SecureStreamViewModel) {
                     viewModel.selectMovie(movie)
                     navController.navigate("detail")
                 },
-                onNavigateToDashboard = { navController.navigate("dashboard") }
+                onNavigateToDashboard = { navController.navigate("dashboard") },
+                onNavigateToAdminDashboard = { navController.navigate("adminDashboard") }
+            )
+        }
+
+        composable("adminDashboard") {
+            AdminDashboardScreen(
+                viewModel = viewModel,
+                onNavigateBack = { navController.popBackStack() }
             )
         }
 

@@ -10,6 +10,10 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.api.LoginRequest
+import com.example.data.api.AdminConversationDto
+import com.example.data.api.AdminDeviceSessionDto
+import com.example.data.api.AdminSystemStatusDto
+import com.example.data.api.AdminUserDto
 import com.example.data.api.MovieCardDto
 import com.example.data.api.OfflineDownloadRequest
 import com.example.data.api.OfflineDownloadResponse
@@ -37,7 +41,7 @@ import kotlinx.coroutines.launch
 sealed interface AuthState {
     object Idle : AuthState
     object Loading : AuthState
-    data class Success(val email: String, val displayName: String) : AuthState
+    data class Success(val email: String, val displayName: String, val role: String? = null) : AuthState
     data class Error(val message: String) : AuthState
 }
 
@@ -66,6 +70,18 @@ sealed interface DownloadStatus {
     data class Downloading(val progress: Float, val displayText: String = "") : DownloadStatus
     object Completed : DownloadStatus
     data class Error(val message: String) : DownloadStatus
+}
+
+sealed interface AdminDashboardState {
+    object Idle : AdminDashboardState
+    object Loading : AdminDashboardState
+    data class Success(
+        val systemStatus: AdminSystemStatusDto?,
+        val users: List<AdminUserDto>,
+        val conversations: List<AdminConversationDto>,
+        val deviceSessions: List<AdminDeviceSessionDto>
+    ) : AdminDashboardState
+    data class Error(val message: String) : AdminDashboardState
 }
 
 class SecureStreamViewModel(application: Application) : AndroidViewModel(application) {
@@ -144,6 +160,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
     private val _dashboardError = MutableStateFlow<String?>(null)
     val dashboardError: StateFlow<String?> = _dashboardError.asStateFlow()
 
+    private val _adminDashboardState = MutableStateFlow<AdminDashboardState>(AdminDashboardState.Idle)
+    val adminDashboardState: StateFlow<AdminDashboardState> = _adminDashboardState.asStateFlow()
 
     init {
         try {
@@ -169,7 +187,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
         if (tokenManager.isLoggedIn()) {
             _authState.value = AuthState.Success(
                 email = tokenManager.getUserEmail() ?: "",
-                displayName = tokenManager.getUserName() ?: (if (_isOnline.value) "Viewer" else "Offline Viewer")
+                displayName = tokenManager.getUserName() ?: (if (_isOnline.value) "Viewer" else "Offline Viewer"),
+                role = tokenManager.getUserRole()
             )
             if (_isOnline.value) {
                 loadCatalog()
@@ -185,7 +204,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
             if (tokenManager.isLoggedIn()) {
                 _authState.value = AuthState.Success(
                     email = tokenManager.getUserEmail() ?: "",
-                    displayName = tokenManager.getUserName() ?: "Viewer"
+                    displayName = tokenManager.getUserName() ?: "Viewer",
+                    role = tokenManager.getUserRole()
                 )
                 loadCatalog()
                 loadDashboardSummary()
@@ -248,7 +268,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
 
                 _authState.value = AuthState.Success(
                     email = response.user.email,
-                    displayName = response.user.displayName
+                    displayName = response.user.displayName,
+                    role = response.user.role
                 )
                 loadCatalog()
             } catch (e: Exception) {
@@ -540,6 +561,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
 
     fun getUserId(): String? = tokenManager.getUserId()
 
+    fun isAdminUser(): Boolean = tokenManager.getUserRole() in setOf("SUPER_ADMIN", "ADMIN", "EDITOR")
+
     fun loadDashboardSummary() {
         if (!_isOnline.value) return
         viewModelScope.launch {
@@ -555,7 +578,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 if (_authState.value is AuthState.Success) {
                     _authState.value = AuthState.Success(
                         email = summary.user.email,
-                        displayName = summary.user.displayName
+                        displayName = summary.user.displayName,
+                        role = summary.user.role
                     )
                 }
             } catch (e: Exception) {
@@ -591,7 +615,8 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 // Update AuthState so UI shows new name instantly
                 _authState.value = AuthState.Success(
                     email = updatedUser.email,
-                    displayName = updatedUser.displayName
+                    displayName = updatedUser.displayName,
+                    role = updatedUser.role
                 )
                 
                 // Refresh dashboard summary
@@ -670,6 +695,31 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 loadNotifications()
             } catch (e: Exception) {
                 Log.e("SecureStreamVM", "Failed to mark all notifications as read")
+            }
+        }
+    }
+
+    fun loadAdminDashboard() {
+        if (!_isOnline.value) return
+        if (!isAdminUser()) {
+            _adminDashboardState.value = AdminDashboardState.Error("Administrator access is required")
+            return
+        }
+        viewModelScope.launch {
+            _adminDashboardState.value = AdminDashboardState.Loading
+            try {
+                val systemStatus = try { api.getAdminSystemStatus() } catch (e: Exception) { null }
+                val users = try { api.getAdminUsers() } catch (e: Exception) { emptyList() }
+                val conversations = try { api.getAdminConversations() } catch (e: Exception) { emptyList() }
+                val deviceSessions = try { api.getAdminDeviceSessions() } catch (e: Exception) { emptyList() }
+                _adminDashboardState.value = AdminDashboardState.Success(
+                    systemStatus = systemStatus,
+                    users = users,
+                    conversations = conversations,
+                    deviceSessions = deviceSessions
+                )
+            } catch (e: Exception) {
+                _adminDashboardState.value = AdminDashboardState.Error(e.message ?: "Failed to load admin dashboard")
             }
         }
     }

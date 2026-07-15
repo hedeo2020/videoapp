@@ -77,6 +77,18 @@ interface SecureStreamApi {
     @GET("account/dashboard")
     suspend fun getDashboardSummary(): DashboardSummaryDto
 
+    @GET("admin/system-status")
+    suspend fun getAdminSystemStatus(): AdminSystemStatusDto
+
+    @GET("admin/users")
+    suspend fun getAdminUsers(): List<AdminUserDto>
+
+    @GET("admin/conversations")
+    suspend fun getAdminConversations(): List<AdminConversationDto>
+
+    @GET("admin/device-sessions")
+    suspend fun getAdminDeviceSessions(): List<AdminDeviceSessionDto>
+
 
     companion object {
         private const val BASE_URL = AppConfig.API_BASE_URL
