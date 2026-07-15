@@ -73,8 +73,6 @@ fun DashboardScreen(
                     kotlinx.coroutines.delay(2500)
                     viewModel.loadMessages()
                 }
-            } else {
-                viewModel.loadMessages()
             }
         }
     }
@@ -108,7 +106,9 @@ fun DashboardScreen(
                         IconButton(
                             onClick = {
                                 viewModel.loadDashboardSummary()
-                                viewModel.loadMessages()
+                                if (selectedTabIndex == 1) {
+                                    viewModel.loadMessages()
+                                }
                                 viewModel.loadNotifications()
                                 Toast.makeText(context, "Dashboard Refreshed", Toast.LENGTH_SHORT).show()
                             },
