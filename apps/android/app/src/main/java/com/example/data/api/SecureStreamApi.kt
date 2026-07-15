@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
+import retrofit2.http.DELETE
 import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Query
@@ -88,6 +89,47 @@ interface SecureStreamApi {
 
     @GET("admin/device-sessions")
     suspend fun getAdminDeviceSessions(): List<AdminDeviceSessionDto>
+
+    @PATCH("admin/users/{id}/status")
+    suspend fun updateAdminUserStatus(
+        @Path("id") id: String,
+        @Body request: AdminUserStatusRequest
+    ): UserDto
+
+    @DELETE("admin/users/{id}")
+    suspend fun deleteAdminUser(
+        @Path("id") id: String
+    ): Any
+
+    @DELETE("admin/device-sessions/{id}")
+    suspend fun revokeAdminDeviceSession(
+        @Path("id") id: String
+    ): Any
+
+    @POST("admin/conversations/{id}/messages")
+    suspend fun sendAdminConversationMessage(
+        @Path("id") id: String,
+        @Body request: AdminMessageRequest
+    ): MessageDto
+
+    @POST("admin/notifications")
+    suspend fun sendAdminNotification(
+        @Body request: AdminNotificationRequest
+    ): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("admin/backups")
+    suspend fun createAdminBackup(): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("admin/backups/run-scheduled-now")
+    suspend fun runAdminScheduledBackupNow(): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("admin/alerts/test")
+    suspend fun testAdminAlert(): Map<String, @JvmSuppressWildcards Any?>
+
+    @PATCH("admin/settings")
+    suspend fun updateAdminSettings(
+        @Body request: AdminSettingsUpdateRequest
+    ): Map<String, @JvmSuppressWildcards Any?>
 
     @GET("admin/movies")
     suspend fun getAdminMoviesRaw(): List<Map<String, @JvmSuppressWildcards Any?>>

@@ -12,8 +12,12 @@ import androidx.lifecycle.viewModelScope
 import com.example.data.api.LoginRequest
 import com.example.data.api.AdminConversationDto
 import com.example.data.api.AdminDeviceSessionDto
+import com.example.data.api.AdminMessageRequest
+import com.example.data.api.AdminNotificationRequest
+import com.example.data.api.AdminSettingsUpdateRequest
 import com.example.data.api.AdminSystemStatusDto
 import com.example.data.api.AdminUserDto
+import com.example.data.api.AdminUserStatusRequest
 import com.example.data.api.MovieCardDto
 import com.example.data.api.OfflineDownloadRequest
 import com.example.data.api.OfflineDownloadResponse
@@ -753,5 +757,91 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 _adminDashboardState.value = AdminDashboardState.Error(e.message ?: "Failed to load admin dashboard")
             }
         }
+    }
+
+    private fun adminAction(
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit,
+        successMessage: String,
+        block: suspend () -> Unit
+    ) {
+        if (!_isOnline.value) {
+            onError("Admin action unavailable while offline")
+            return
+        }
+        if (!isAdminUser()) {
+            onError("Administrator access is required")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                block()
+                loadAdminDashboard()
+                onSuccess(successMessage)
+            } catch (e: Exception) {
+                Log.e("SecureStreamVM", "Admin action failed", e)
+                onError(e.message ?: "Admin action failed")
+            }
+        }
+    }
+
+    fun adminSetUserStatus(userId: String, status: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "User status updated") {
+            api.updateAdminUserStatus(userId, AdminUserStatusRequest(status))
+        }
+
+    fun adminDeleteUser(userId: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "User deleted") {
+            api.deleteAdminUser(userId)
+        }
+
+    fun adminRevokeDeviceSession(sessionId: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Device session revoked") {
+            api.revokeAdminDeviceSession(sessionId)
+        }
+
+    fun adminReplyToConversation(conversationId: String, body: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Reply sent") {
+            api.sendAdminConversationMessage(conversationId, AdminMessageRequest(body.trim()))
+        }
+
+    fun adminSendNotification(title: String, body: String, onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Notification sent") {
+            api.sendAdminNotification(AdminNotificationRequest(title = title.trim(), body = body.trim(), allUsers = true))
+        }
+
+    fun adminCreateBackup(onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Backup started") {
+            api.createAdminBackup()
+        }
+
+    fun adminRunScheduledBackupNow(onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Scheduled backup started") {
+            api.runAdminScheduledBackupNow()
+        }
+
+    fun adminTestAlert(onSuccess: (String) -> Unit, onError: (String) -> Unit) =
+        adminAction(onSuccess, onError, "Test alert sent") {
+            api.testAdminAlert()
+        }
+
+    fun adminUpdateSettings(
+        deleteOriginalAfterPreview: Boolean? = null,
+        maintenanceMode: Boolean? = null,
+        maintenanceMessage: String? = null,
+        backupScheduleEnabled: Boolean? = null,
+        backupScheduleDrive: Boolean? = null,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) = adminAction(onSuccess, onError, "Settings updated") {
+        api.updateAdminSettings(
+            AdminSettingsUpdateRequest(
+                deleteOriginalAfterPreview = deleteOriginalAfterPreview,
+                maintenanceMode = maintenanceMode,
+                maintenanceMessage = maintenanceMessage,
+                backupScheduleEnabled = backupScheduleEnabled,
+                backupScheduleDrive = backupScheduleDrive
+            )
+        )
     }
 }

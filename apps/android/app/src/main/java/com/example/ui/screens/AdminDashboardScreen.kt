@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,12 +27,16 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
@@ -48,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -160,10 +166,10 @@ fun AdminDashboardScreen(
                 is AdminDashboardState.Success -> {
                     when (val tab = tabs[selectedTab]) {
                         "Overview" -> AdminOverviewTab(current.systemStatus, current.users, current.conversations, current.deviceSessions)
-                        "Users" -> AdminUsersTab(current.users)
-                        "Messages" -> AdminMessagesTab(current.conversations)
-                        "Device Sessions" -> AdminDevicesTab(current.deviceSessions)
-                        else -> GenericAdminPanel(tab, current.panels[tab])
+                        "Users" -> AdminUsersTab(viewModel, current.users)
+                        "Messages" -> AdminMessagesTab(viewModel, current.conversations)
+                        "Device Sessions" -> AdminDevicesTab(viewModel, current.deviceSessions)
+                        else -> GenericAdminPanel(viewModel, tab, current.panels[tab])
                     }
                 }
             }
@@ -212,7 +218,7 @@ private fun AdminOverviewTab(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                 AdminMetricCard("Devices", "${devices.size}", "active sessions", Icons.Filled.Devices, Modifier.weight(1f))
-                AdminMetricCard("CPU", "${system?.cpu?.cores ?: "-"}", "cores", Icons.Filled.Memory, Modifier.weight(1f))
+                AdminMetricCard("CPU", "${system?.cpu?.usedPercent ?: 0}%", "${system?.cpu?.cores ?: "-"} cores", Icons.Filled.Memory, Modifier.weight(1f))
             }
         }
         item {
@@ -235,7 +241,10 @@ private fun AdminOverviewTab(
 }
 
 @Composable
-private fun AdminUsersTab(users: List<AdminUserDto>) {
+private fun AdminUsersTab(viewModel: SecureStreamViewModel, users: List<AdminUserDto>) {
+    val context = LocalContext.current
+    val ok: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    val fail: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(users) { user ->
             AdminCard {
@@ -251,15 +260,31 @@ private fun AdminUsersTab(users: List<AdminUserDto>) {
                 Spacer(Modifier.height(8.dp))
                 DetailLine("Status", user.status ?: "Unknown")
                 DetailLine("Restricted", if (user.accessRestricted == true) "Yes" else "No")
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    AdminActionButton(
+                        label = if (user.status == "ACTIVE") "Suspend" else "Activate",
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        viewModel.adminSetUserStatus(user.id, if (user.status == "ACTIVE") "SUSPENDED" else "ACTIVE", ok, fail)
+                    }
+                    AdminDangerButton(label = "Delete", modifier = Modifier.weight(1f)) {
+                        viewModel.adminDeleteUser(user.id, ok, fail)
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AdminMessagesTab(conversations: List<AdminConversationDto>) {
+private fun AdminMessagesTab(viewModel: SecureStreamViewModel, conversations: List<AdminConversationDto>) {
+    val context = LocalContext.current
+    val ok: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    val fail: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(conversations) { conversation ->
+            var reply by remember(conversation.id) { mutableStateOf("") }
             AdminCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -273,13 +298,25 @@ private fun AdminMessagesTab(conversations: List<AdminConversationDto>) {
                 }
                 Spacer(Modifier.height(8.dp))
                 DetailLine("Updated", prettyDate(conversation.updatedAt))
+                Spacer(Modifier.height(10.dp))
+                AdminTextField(value = reply, onValueChange = { reply = it }, label = "Reply")
+                Spacer(Modifier.height(8.dp))
+                AdminActionButton(label = "Send reply", enabled = reply.isNotBlank()) {
+                    viewModel.adminReplyToConversation(conversation.id, reply, { message ->
+                        reply = ""
+                        ok(message)
+                    }, fail)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AdminDevicesTab(devices: List<AdminDeviceSessionDto>) {
+private fun AdminDevicesTab(viewModel: SecureStreamViewModel, devices: List<AdminDeviceSessionDto>) {
+    val context = LocalContext.current
+    val ok: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    val fail: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
     LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(devices) { session ->
             AdminCard {
@@ -294,13 +331,17 @@ private fun AdminDevicesTab(devices: List<AdminDeviceSessionDto>) {
                 Spacer(Modifier.height(8.dp))
                 DetailLine("Last used", prettyDate(session.lastUsedAt))
                 DetailLine("Expires", prettyDate(session.expiresAt))
+                Spacer(Modifier.height(10.dp))
+                AdminDangerButton(label = "Revoke session") {
+                    viewModel.adminRevokeDeviceSession(session.id, ok, fail)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun GenericAdminPanel(title: String, panel: AdminPanelData?) {
+private fun GenericAdminPanel(viewModel: SecureStreamViewModel, title: String, panel: AdminPanelData?) {
     if (panel == null) {
         LazyColumn(contentPadding = PaddingValues(16.dp)) {
             item {
@@ -334,6 +375,10 @@ private fun GenericAdminPanel(title: String, panel: AdminPanelData?) {
                     DetailLine("Details", panel.details.size.toString())
                 }
             }
+        }
+
+        item {
+            AdminPanelActions(viewModel, title, panel)
         }
 
         if (panel.details.isNotEmpty()) {
@@ -383,6 +428,105 @@ private fun GenericRecordCard(row: Map<String, Any?>) {
 }
 
 @Composable
+private fun AdminPanelActions(viewModel: SecureStreamViewModel, title: String, panel: AdminPanelData) {
+    val context = LocalContext.current
+    val ok: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    val fail: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+
+    when (title) {
+        "Notifications" -> {
+            var notificationTitle by remember { mutableStateOf("") }
+            var notificationBody by remember { mutableStateOf("") }
+            AdminCard {
+                Text("Send notification", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(notificationTitle, { notificationTitle = it }, "Title")
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(notificationBody, { notificationBody = it }, "Message")
+                Spacer(Modifier.height(10.dp))
+                AdminActionButton(label = "Send to all active viewers", enabled = notificationTitle.isNotBlank() && notificationBody.isNotBlank()) {
+                    viewModel.adminSendNotification(notificationTitle, notificationBody, { message ->
+                        notificationTitle = ""
+                        notificationBody = ""
+                        ok(message)
+                    }, fail)
+                }
+            }
+        }
+        "Backup & Restore" -> {
+            AdminCard {
+                Text("Backup actions", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    AdminActionButton("Create backup", Modifier.weight(1f)) {
+                        viewModel.adminCreateBackup(ok, fail)
+                    }
+                    AdminActionButton("Run schedule", Modifier.weight(1f)) {
+                        viewModel.adminRunScheduledBackupNow(ok, fail)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("Restore still requires file selection, so keep restore on the web panel for safety.", color = SecureTextGray, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        "Settings" -> {
+            val maintenanceMap = panel.details["maintenance"] as? Map<*, *>
+            val backupMap = panel.details["backupSchedule"] as? Map<*, *>
+            val deleteOriginal = panel.details["deleteOriginalAfterPreview"] as? Boolean ?: false
+            val maintenance = maintenanceMap?.get("enabled") as? Boolean ?: false
+            val backupEnabled = backupMap?.get("enabled") as? Boolean ?: false
+            val backupDrive = backupMap?.get("uploadToDrive") as? Boolean ?: false
+            var maintenanceMessage by remember { mutableStateOf((maintenanceMap?.get("message") as? String).orEmpty()) }
+            AdminCard {
+                Text("Settings actions", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                AdminActionButton(if (deleteOriginal) "Keep originals" else "Delete originals after preview") {
+                    viewModel.adminUpdateSettings(deleteOriginalAfterPreview = !deleteOriginal, onSuccess = ok, onError = fail)
+                }
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(maintenanceMessage, { maintenanceMessage = it }, "Maintenance message")
+                Spacer(Modifier.height(8.dp))
+                AdminActionButton(if (maintenance) "Disable maintenance" else "Enable maintenance") {
+                    viewModel.adminUpdateSettings(maintenanceMode = !maintenance, maintenanceMessage = maintenanceMessage, onSuccess = ok, onError = fail)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    AdminActionButton(if (backupEnabled) "Pause backups" else "Enable backups", Modifier.weight(1f)) {
+                        viewModel.adminUpdateSettings(backupScheduleEnabled = !backupEnabled, onSuccess = ok, onError = fail)
+                    }
+                    AdminActionButton(if (backupDrive) "Drive off" else "Drive on", Modifier.weight(1f)) {
+                        viewModel.adminUpdateSettings(backupScheduleDrive = !backupDrive, onSuccess = ok, onError = fail)
+                    }
+                }
+            }
+        }
+        "Security" -> {
+            AdminCard {
+                Text("Alert actions", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                AdminActionButton("Send test Discord/platform alert") {
+                    viewModel.adminTestAlert(ok, fail)
+                }
+            }
+        }
+        "Uploads" -> {
+            AdminCard {
+                Text("Mobile upload", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("Upload controls need Android file picker integration. For now, use the web panel for large video uploads.", color = SecureTextGray)
+            }
+        }
+        "Video Editor" -> {
+            AdminCard {
+                Text("Mobile editor", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("Trim job creation needs a dedicated touch timeline. Job monitoring is enabled here; editing controls can be added next.", color = SecureTextGray)
+            }
+        }
+    }
+}
+
+@Composable
 private fun AdminMetricCard(title: String, value: String, caption: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier = Modifier) {
     AdminCard(modifier = modifier) {
         Icon(icon, contentDescription = null, tint = SecureMintAccent)
@@ -390,6 +534,48 @@ private fun AdminMetricCard(title: String, value: String, caption: String, icon:
         Text(value, color = SecureTextWhite, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(title, color = SecureTextWhite, fontWeight = FontWeight.Bold)
         Text(caption, color = SecureTextGray, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+@Composable
+private fun AdminTextField(value: String, onValueChange: (String) -> Unit, label: String) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label) },
+        modifier = Modifier.fillMaxWidth(),
+        colors = OutlinedTextFieldDefaults.colors(
+            focusedBorderColor = SecureMintAccent,
+            unfocusedBorderColor = SecureTextGray,
+            focusedLabelColor = SecureMintAccent,
+            unfocusedLabelColor = SecureTextGray,
+            focusedTextColor = SecureTextWhite,
+            unfocusedTextColor = SecureTextWhite,
+            cursorColor = SecureMintAccent
+        )
+    )
+}
+
+@Composable
+private fun AdminActionButton(label: String, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(containerColor = SecureMintAccent, contentColor = SecureDarkBackground)
+    ) {
+        Text(label, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun AdminDangerButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Button(
+        onClick = onClick,
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444), contentColor = Color.White)
+    ) {
+        Text(label, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

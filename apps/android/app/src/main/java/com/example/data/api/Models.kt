@@ -183,7 +183,8 @@ data class AdminHostDto(
 @JsonClass(generateAdapter = true)
 data class AdminCpuDto(
     val cores: Int? = null,
-    val loadAverage: List<Double>? = null
+    val loadAverage: List<Double>? = null,
+    val usedPercent: Int? = null
 )
 
 @JsonClass(generateAdapter = true)
@@ -257,6 +258,33 @@ data class AdminDeviceSessionDto(
     val lastUsedAt: String? = null,
     val expiresAt: String? = null,
     val user: AdminBasicUserDto? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminUserStatusRequest(
+    val status: String
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminMessageRequest(
+    val body: String
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminNotificationRequest(
+    val title: String,
+    val body: String,
+    val allUsers: Boolean = true,
+    val userIds: List<String> = emptyList()
+)
+
+@JsonClass(generateAdapter = true)
+data class AdminSettingsUpdateRequest(
+    val deleteOriginalAfterPreview: Boolean? = null,
+    val maintenanceMode: Boolean? = null,
+    val maintenanceMessage: String? = null,
+    val backupScheduleEnabled: Boolean? = null,
+    val backupScheduleDrive: Boolean? = null
 )
 
 
