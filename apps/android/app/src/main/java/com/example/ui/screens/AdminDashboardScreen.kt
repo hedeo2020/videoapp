@@ -61,6 +61,7 @@ import com.example.ui.theme.SecureMintAccent
 import com.example.ui.theme.SecureTextGray
 import com.example.ui.theme.SecureTextWhite
 import com.example.ui.viewmodel.AdminDashboardState
+import com.example.ui.viewmodel.AdminPanelData
 import com.example.ui.viewmodel.SecureStreamViewModel
 import kotlinx.coroutines.delay
 
@@ -73,7 +74,31 @@ fun AdminDashboardScreen(
 ) {
     val state by viewModel.adminDashboardState.collectAsState()
     var selectedTab by remember { mutableStateOf(0) }
-    val tabs = listOf("Overview", "Users", "Messages", "Devices")
+    val tabs = listOf(
+        "Overview",
+        "Catalog",
+        "Videos",
+        "Video Editor",
+        "File Manager",
+        "Storage",
+        "Series",
+        "Uploads",
+        "Processing",
+        "Collections",
+        "Users",
+        "Device Sessions",
+        "Messages",
+        "Notifications",
+        "API Tokens",
+        "Playback sessions",
+        "Watermark Trace",
+        "Backup & Restore",
+        "Activity",
+        "Trash",
+        "Audit logs",
+        "Security",
+        "Settings"
+    )
 
     LaunchedEffect(Unit) {
         viewModel.loadAdminDashboard()
@@ -133,11 +158,12 @@ fun AdminDashboardScreen(
                 is AdminDashboardState.Loading -> LoadingAdminState()
                 is AdminDashboardState.Error -> ErrorAdminState(current.message)
                 is AdminDashboardState.Success -> {
-                    when (selectedTab) {
-                        0 -> AdminOverviewTab(current.systemStatus, current.users, current.conversations, current.deviceSessions)
-                        1 -> AdminUsersTab(current.users)
-                        2 -> AdminMessagesTab(current.conversations)
-                        3 -> AdminDevicesTab(current.deviceSessions)
+                    when (val tab = tabs[selectedTab]) {
+                        "Overview" -> AdminOverviewTab(current.systemStatus, current.users, current.conversations, current.deviceSessions)
+                        "Users" -> AdminUsersTab(current.users)
+                        "Messages" -> AdminMessagesTab(current.conversations)
+                        "Device Sessions" -> AdminDevicesTab(current.deviceSessions)
+                        else -> GenericAdminPanel(tab, current.panels[tab])
                     }
                 }
             }
@@ -274,6 +300,89 @@ private fun AdminDevicesTab(devices: List<AdminDeviceSessionDto>) {
 }
 
 @Composable
+private fun GenericAdminPanel(title: String, panel: AdminPanelData?) {
+    if (panel == null) {
+        LazyColumn(contentPadding = PaddingValues(16.dp)) {
+            item {
+                AdminCard {
+                    Text(title, color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("This panel is ready for mobile UI wiring, but no readable endpoint data was returned.", color = SecureTextGray)
+                }
+            }
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            AdminCard {
+                Text(panel.title, color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                Text(panel.subtitle, color = SecureTextGray)
+                if (!panel.mobileNote.isNullOrBlank()) {
+                    Spacer(Modifier.height(10.dp))
+                    Text(panel.mobileNote, color = SecureMintAccent, style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(8.dp))
+                DetailLine("Rows", panel.rows.size.toString())
+                if (panel.details.isNotEmpty()) {
+                    DetailLine("Details", panel.details.size.toString())
+                }
+            }
+        }
+
+        if (panel.details.isNotEmpty()) {
+            item {
+                AdminCard {
+                    Text("Details", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    panel.details.entries.take(16).forEach { (key, value) ->
+                        DetailLine(key, compactValue(value))
+                    }
+                }
+            }
+        }
+
+        if (panel.rows.isEmpty() && panel.details.isEmpty()) {
+            item {
+                AdminCard {
+                    Text("No records yet", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    Text("When this panel has data, it will appear here.", color = SecureTextGray)
+                }
+            }
+        } else {
+            items(panel.rows.take(80)) { row ->
+                GenericRecordCard(row)
+            }
+        }
+    }
+}
+
+@Composable
+private fun GenericRecordCard(row: Map<String, Any?>) {
+    val title = firstString(row, "title", "name", "email", "action", "id") ?: "Record"
+    val subtitle = firstString(row, "status", "role", "state", "kind", "createdAt", "updatedAt") ?: ""
+    AdminCard {
+        Text(title, color = SecureTextWhite, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (subtitle.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(subtitle, color = SecureMintAccent, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.height(8.dp))
+        row.entries
+            .filter { (key, value) -> value != null && key !in setOf("id", "title", "name", "email", "action", "status", "role", "state", "kind") }
+            .take(5)
+            .forEach { (key, value) -> DetailLine(key, compactValue(value)) }
+    }
+}
+
+@Composable
 private fun AdminMetricCard(title: String, value: String, caption: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier = Modifier) {
     AdminCard(modifier = modifier) {
         Icon(icon, contentDescription = null, tint = SecureMintAccent)
@@ -344,4 +453,24 @@ private fun formatBytes(value: Long?): String {
 private fun prettyDate(value: String?): String {
     if (value.isNullOrBlank()) return "-"
     return value.replace("T", " ").replace(Regex("\\.\\d+Z$"), " UTC").replace("Z", " UTC")
+}
+
+private fun firstString(row: Map<String, Any?>, vararg keys: String): String? {
+    for (key in keys) {
+        val value = row[key]
+        if (value is String && value.isNotBlank()) return value
+        if (value != null && value !is Map<*, *> && value !is List<*>) return value.toString()
+    }
+    return null
+}
+
+private fun compactValue(value: Any?): String {
+    return when (value) {
+        null -> "-"
+        is String -> prettyDate(value).takeIf { value.contains("T") && value.endsWith("Z") } ?: value
+        is Number, is Boolean -> value.toString()
+        is List<*> -> "${value.size} item${if (value.size == 1) "" else "s"}"
+        is Map<*, *> -> "${value.size} field${if (value.size == 1) "" else "s"}"
+        else -> value.toString()
+    }
 }

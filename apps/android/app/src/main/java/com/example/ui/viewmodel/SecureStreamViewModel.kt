@@ -79,10 +79,19 @@ sealed interface AdminDashboardState {
         val systemStatus: AdminSystemStatusDto?,
         val users: List<AdminUserDto>,
         val conversations: List<AdminConversationDto>,
-        val deviceSessions: List<AdminDeviceSessionDto>
+        val deviceSessions: List<AdminDeviceSessionDto>,
+        val panels: Map<String, AdminPanelData> = emptyMap()
     ) : AdminDashboardState
     data class Error(val message: String) : AdminDashboardState
 }
+
+data class AdminPanelData(
+    val title: String,
+    val subtitle: String,
+    val rows: List<Map<String, Any?>> = emptyList(),
+    val details: Map<String, Any?> = emptyMap(),
+    val mobileNote: String? = null
+)
 
 class SecureStreamViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -712,11 +721,33 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 val users = try { api.getAdminUsers() } catch (e: Exception) { emptyList() }
                 val conversations = try { api.getAdminConversations() } catch (e: Exception) { emptyList() }
                 val deviceSessions = try { api.getAdminDeviceSessions() } catch (e: Exception) { emptyList() }
+                val panels = buildMap {
+                    put("Catalog", AdminPanelData("Catalog", "Folders and published catalog organization", rows = runCatching { api.getAdminCollectionsRaw() }.getOrDefault(emptyList())))
+                    put("Videos", AdminPanelData("Videos", "Video records, status, and assets", rows = runCatching { api.getAdminMoviesRaw() }.getOrDefault(emptyList())))
+                    put("Video Editor", AdminPanelData("Video Editor", "Trim jobs and editor queue", rows = runCatching { api.getAdminEditorJobsRaw() }.getOrDefault(emptyList()), mobileNote = "Starting trim jobs is safer from the web admin panel. Mobile shows job status."))
+                    put("File Manager", AdminPanelData("File Manager", "Stored media files and generated previews", rows = runCatching { api.getAdminFilesRaw() }.getOrDefault(emptyList())))
+                    put("Storage", AdminPanelData("Storage", "Storage breakdown and cleanup information", details = runCatching { api.getAdminStorageBreakdownRaw() }.getOrDefault(emptyMap())))
+                    put("Series", AdminPanelData("Series", "Series, seasons, and episodes", rows = runCatching { api.getAdminSeriesRaw() }.getOrDefault(emptyList())))
+                    put("Uploads", AdminPanelData("Uploads", "Upload center", mobileNote = "Large uploads are still best handled from the web admin panel. Mobile upload controls can be added next."))
+                    put("Processing", AdminPanelData("Processing", "Transcoding and worker queue", details = runCatching { api.getAdminProcessingRaw() }.getOrDefault(emptyMap())))
+                    put("Collections", AdminPanelData("Collections", "Folders, subfolders, and ordering", rows = runCatching { api.getAdminCollectionsRaw() }.getOrDefault(emptyList())))
+                    put("Notifications", AdminPanelData("Notifications", "Admin announcements sent to users", rows = runCatching { api.getAdminNotificationsRaw() }.getOrDefault(emptyList())))
+                    put("API Tokens", AdminPanelData("API Tokens", "Automation tokens for n8n and integrations", rows = runCatching { api.getAdminApiTokensRaw() }.getOrDefault(emptyList()), mobileNote = "Creating/revealing tokens should be done carefully from the web panel."))
+                    put("Playback sessions", AdminPanelData("Playback sessions", "Recent playback activity", rows = runCatching { api.getAdminPlaybackRaw() }.getOrDefault(emptyList())))
+                    put("Watermark Trace", AdminPanelData("Watermark Trace", "Trace visible playback watermarks", rows = runCatching { api.getAdminPlaybackRaw() }.getOrDefault(emptyList()), mobileNote = "Use the web panel for exact watermark paste/search; mobile shows source sessions."))
+                    put("Backup & Restore", AdminPanelData("Backup & Restore", "Portable backups and Google Drive status", details = runCatching { api.getAdminBackupsRaw() }.getOrDefault(emptyMap()), mobileNote = "Restore uploads are intentionally left to the web panel for safety."))
+                    put("Activity", AdminPanelData("Activity", "Recent admin activity", rows = runCatching { api.getAdminActivityRaw() }.getOrDefault(emptyList())))
+                    put("Trash", AdminPanelData("Trash", "Deleted users and videos", details = runCatching { api.getAdminTrashRaw() }.getOrDefault(emptyMap())))
+                    put("Audit logs", AdminPanelData("Audit logs", "Audit trail", rows = runCatching { api.getAdminAuditLogsRaw() }.getOrDefault(emptyList())))
+                    put("Security", AdminPanelData("Security", "Security events", rows = runCatching { api.getAdminSecurityEventsRaw() }.getOrDefault(emptyList())))
+                    put("Settings", AdminPanelData("Settings", "Platform settings and maintenance mode", details = runCatching { api.getAdminSettingsRaw() }.getOrDefault(emptyMap()), mobileNote = "Editing settings from mobile can be added after confirmation; current view is read-only."))
+                }
                 _adminDashboardState.value = AdminDashboardState.Success(
                     systemStatus = systemStatus,
                     users = users,
                     conversations = conversations,
-                    deviceSessions = deviceSessions
+                    deviceSessions = deviceSessions,
+                    panels = panels
                 )
             } catch (e: Exception) {
                 _adminDashboardState.value = AdminDashboardState.Error(e.message ?: "Failed to load admin dashboard")

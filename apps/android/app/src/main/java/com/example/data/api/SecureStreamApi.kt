@@ -89,6 +89,54 @@ interface SecureStreamApi {
     @GET("admin/device-sessions")
     suspend fun getAdminDeviceSessions(): List<AdminDeviceSessionDto>
 
+    @GET("admin/movies")
+    suspend fun getAdminMoviesRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/series")
+    suspend fun getAdminSeriesRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/collections")
+    suspend fun getAdminCollectionsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/files")
+    suspend fun getAdminFilesRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/storage-breakdown")
+    suspend fun getAdminStorageBreakdownRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @GET("admin/processing/jobs")
+    suspend fun getAdminProcessingRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @GET("admin/notifications")
+    suspend fun getAdminNotificationsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/api-tokens")
+    suspend fun getAdminApiTokensRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/playback-sessions")
+    suspend fun getAdminPlaybackRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/backups")
+    suspend fun getAdminBackupsRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @GET("admin/activity")
+    suspend fun getAdminActivityRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/trash")
+    suspend fun getAdminTrashRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @GET("admin/audit-logs")
+    suspend fun getAdminAuditLogsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/security-events")
+    suspend fun getAdminSecurityEventsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
+    @GET("admin/settings")
+    suspend fun getAdminSettingsRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @GET("admin/editor/jobs")
+    suspend fun getAdminEditorJobsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
+
 
     companion object {
         private const val BASE_URL = AppConfig.API_BASE_URL
