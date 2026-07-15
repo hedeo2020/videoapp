@@ -55,38 +55,44 @@ private const val SESSION_LOGGED_IN = "logged_in"
 class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    enableAppFullscreen()
     setContent { SecureStreamApp() }
+    scheduleAppFullscreen()
   }
   override fun onResume() {
     super.onResume()
-    enableAppFullscreen()
+    scheduleAppFullscreen()
   }
   override fun onWindowFocusChanged(hasFocus: Boolean) {
     super.onWindowFocusChanged(hasFocus)
-    if (hasFocus) enableAppFullscreen()
+    if (hasFocus) scheduleAppFullscreen()
   }
 
   fun enterProtectedPlayback() { window.addFlags(WindowManager.LayoutParams.FLAG_SECURE) }
   fun leaveProtectedPlayback() { window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
 
+  private fun scheduleAppFullscreen() {
+    window.decorView.post { enableAppFullscreen() }
+  }
+
   private fun enableAppFullscreen() {
-    window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-      window.setDecorFitsSystemWindows(false)
-      window.insetsController?.let { controller ->
-        controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-        controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    runCatching {
+      window.setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN)
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        window.setDecorFitsSystemWindows(false)
+        window.decorView.windowInsetsController?.let { controller ->
+          controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+          controller.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+      } else {
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+          View.SYSTEM_UI_FLAG_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE
       }
-    } else {
-      @Suppress("DEPRECATION")
-      window.decorView.systemUiVisibility =
-        View.SYSTEM_UI_FLAG_FULLSCREEN or
-          View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
-          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
-          View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-          View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
-          View.SYSTEM_UI_FLAG_LAYOUT_STABLE
     }
   }
 }
