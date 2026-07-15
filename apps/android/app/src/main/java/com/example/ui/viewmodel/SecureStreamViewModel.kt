@@ -2,13 +2,17 @@ package com.example.ui.viewmodel
 
 import android.app.Application
 import android.content.Context
+import android.database.Cursor
+import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.provider.OpenableColumns
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.api.AdminTrimJobRequest
 import com.example.data.api.LoginRequest
 import com.example.data.api.AdminConversationDto
 import com.example.data.api.AdminDeviceSessionDto
@@ -35,12 +39,20 @@ import com.example.data.storage.AppDatabase
 import com.example.data.storage.DownloadedVideo
 import com.example.data.storage.TokenManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import java.util.UUID
 
 sealed interface AuthState {
     object Idle : AuthState
@@ -95,6 +107,12 @@ data class AdminPanelData(
     val rows: List<Map<String, Any?>> = emptyList(),
     val details: Map<String, Any?> = emptyMap(),
     val mobileNote: String? = null
+)
+
+data class AdminUploadState(
+    val running: Boolean = false,
+    val progress: Int = 0,
+    val phase: String = ""
 )
 
 class SecureStreamViewModel(application: Application) : AndroidViewModel(application) {
@@ -175,6 +193,9 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
 
     private val _adminDashboardState = MutableStateFlow<AdminDashboardState>(AdminDashboardState.Idle)
     val adminDashboardState: StateFlow<AdminDashboardState> = _adminDashboardState.asStateFlow()
+
+    private val _adminUploadState = MutableStateFlow(AdminUploadState())
+    val adminUploadState: StateFlow<AdminUploadState> = _adminUploadState.asStateFlow()
 
     init {
         try {
@@ -712,14 +733,17 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    fun loadAdminDashboard() {
+    fun loadAdminDashboard(silent: Boolean = false) {
         if (!_isOnline.value) return
         if (!isAdminUser()) {
             _adminDashboardState.value = AdminDashboardState.Error("Administrator access is required")
             return
         }
         viewModelScope.launch {
-            _adminDashboardState.value = AdminDashboardState.Loading
+            val currentState = _adminDashboardState.value
+            if (!silent || currentState !is AdminDashboardState.Success) {
+                _adminDashboardState.value = AdminDashboardState.Loading
+            }
             try {
                 val systemStatus = try { api.getAdminSystemStatus() } catch (e: Exception) { null }
                 val users = try { api.getAdminUsers() } catch (e: Exception) { emptyList() }
@@ -728,11 +752,11 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 val panels = buildMap {
                     put("Catalog", AdminPanelData("Catalog", "Folders and published catalog organization", rows = runCatching { api.getAdminCollectionsRaw() }.getOrDefault(emptyList())))
                     put("Videos", AdminPanelData("Videos", "Video records, status, and assets", rows = runCatching { api.getAdminMoviesRaw() }.getOrDefault(emptyList())))
-                    put("Video Editor", AdminPanelData("Video Editor", "Trim jobs and editor queue", rows = runCatching { api.getAdminEditorJobsRaw() }.getOrDefault(emptyList()), mobileNote = "Starting trim jobs is safer from the web admin panel. Mobile shows job status."))
+                    put("Video Editor", AdminPanelData("Video Editor", "Trim jobs and editor queue", rows = runCatching { api.getAdminEditorJobsRaw() }.getOrDefault(emptyList()), details = mapOf("assets" to runCatching { api.getAdminFilesRaw() }.getOrDefault(emptyList()))))
                     put("File Manager", AdminPanelData("File Manager", "Stored media files and generated previews", rows = runCatching { api.getAdminFilesRaw() }.getOrDefault(emptyList())))
                     put("Storage", AdminPanelData("Storage", "Storage breakdown and cleanup information", details = runCatching { api.getAdminStorageBreakdownRaw() }.getOrDefault(emptyMap())))
                     put("Series", AdminPanelData("Series", "Series, seasons, and episodes", rows = runCatching { api.getAdminSeriesRaw() }.getOrDefault(emptyList())))
-                    put("Uploads", AdminPanelData("Uploads", "Upload center", mobileNote = "Large uploads are still best handled from the web admin panel. Mobile upload controls can be added next."))
+                    put("Uploads", AdminPanelData("Uploads", "Upload center", rows = runCatching { api.getAdminMoviesRaw() }.getOrDefault(emptyList()), mobileNote = "Large files can take time on mobile. Keep this screen open until upload and preview conversion finish."))
                     put("Processing", AdminPanelData("Processing", "Transcoding and worker queue", details = runCatching { api.getAdminProcessingRaw() }.getOrDefault(emptyMap())))
                     put("Collections", AdminPanelData("Collections", "Folders, subfolders, and ordering", rows = runCatching { api.getAdminCollectionsRaw() }.getOrDefault(emptyList())))
                     put("Notifications", AdminPanelData("Notifications", "Admin announcements sent to users", rows = runCatching { api.getAdminNotificationsRaw() }.getOrDefault(emptyList())))
@@ -754,7 +778,9 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                     panels = panels
                 )
             } catch (e: Exception) {
-                _adminDashboardState.value = AdminDashboardState.Error(e.message ?: "Failed to load admin dashboard")
+                if (!silent || _adminDashboardState.value !is AdminDashboardState.Success) {
+                    _adminDashboardState.value = AdminDashboardState.Error(e.message ?: "Failed to load admin dashboard")
+                }
             }
         }
     }
@@ -776,7 +802,7 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             try {
                 block()
-                loadAdminDashboard()
+                loadAdminDashboard(silent = true)
                 onSuccess(successMessage)
             } catch (e: Exception) {
                 Log.e("SecureStreamVM", "Admin action failed", e)
@@ -843,5 +869,144 @@ class SecureStreamViewModel(application: Application) : AndroidViewModel(applica
                 backupScheduleDrive = backupScheduleDrive
             )
         )
+    }
+
+    fun adminUploadVideo(
+        uri: Uri,
+        title: String,
+        synopsis: String,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        if (!_isOnline.value) {
+            onError("Upload unavailable while offline")
+            return
+        }
+        if (!isAdminUser()) {
+            onError("Administrator access is required")
+            return
+        }
+        if (title.isBlank()) {
+            onError("Title is required")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val resolver = getApplication<Application>().contentResolver
+            var progressPoller: kotlinx.coroutines.Job? = null
+            try {
+                val uploadId = UUID.randomUUID().toString()
+                val fileName = displayNameForUri(uri) ?: "securestream-upload.mp4"
+                val mimeType = resolver.getType(uri) ?: "application/octet-stream"
+                val size = sizeForUri(uri)
+                _adminUploadState.value = AdminUploadState(running = true, progress = 1, phase = "Preparing upload")
+                progressPoller = launch {
+                    while (isActive) {
+                        delay(1000)
+                        val progress = runCatching { api.getAdminUploadProgress(uploadId) }.getOrNull() ?: continue
+                        val phase = (progress["phase"] as? String).orEmpty()
+                        val serverProgress = when (val value = progress["progress"]) {
+                            is Number -> value.toInt()
+                            is String -> value.toIntOrNull() ?: 0
+                            else -> 0
+                        }.coerceIn(0, 100)
+                        if (phase.contains("convert", ignoreCase = true) || phase.contains("ready", ignoreCase = true)) {
+                            _adminUploadState.value = AdminUploadState(
+                                running = true,
+                                progress = serverProgress,
+                                phase = phase.ifBlank { "Converting preview" }
+                            )
+                        }
+                    }
+                }
+                val body = StreamingUriRequestBody(
+                    context = getApplication(),
+                    uri = uri,
+                    mimeType = mimeType,
+                    size = size
+                ) { sent, total ->
+                    val percent = if (total > 0) ((sent * 94) / total).toInt().coerceIn(1, 94) else 50
+                    _adminUploadState.value = AdminUploadState(running = true, progress = percent, phase = "Uploading")
+                }
+                val part = MultipartBody.Part.createFormData("file", fileName, body)
+                val textType = "text/plain".toMediaTypeOrNull()
+                api.uploadAdminVideoDirect(
+                    uploadId = uploadId,
+                    file = part,
+                    title = title.trim().toRequestBody(textType),
+                    synopsis = synopsis.trim().toRequestBody(textType),
+                    maturityRating = "".toRequestBody(textType)
+                )
+                progressPoller?.cancel()
+                _adminUploadState.value = AdminUploadState(running = true, progress = 98, phase = "Processing preview")
+                loadAdminDashboard(silent = true)
+                _adminUploadState.value = AdminUploadState(running = false, progress = 100, phase = "Upload complete")
+                onSuccess("Video uploaded as draft")
+            } catch (e: Exception) {
+                progressPoller?.cancel()
+                Log.e("SecureStreamVM", "Admin upload failed", e)
+                _adminUploadState.value = AdminUploadState()
+                onError(e.message ?: "Upload failed")
+            }
+        }
+    }
+
+    fun adminCreateTrimJob(
+        assetId: String,
+        startSeconds: Double,
+        endSeconds: Double,
+        title: String,
+        onSuccess: (String) -> Unit,
+        onError: (String) -> Unit
+    ) = adminAction(onSuccess, onError, "Trim job queued") {
+        if (assetId.isBlank()) error("Choose a video asset first")
+        if (endSeconds <= startSeconds) error("End time must be after start time")
+        api.createAdminTrimJob(
+            AdminTrimJobRequest(
+                assetId = assetId.trim(),
+                startSeconds = startSeconds,
+                endSeconds = endSeconds,
+                title = title.trim().ifBlank { null }
+            )
+        )
+    }
+
+    private fun displayNameForUri(uri: Uri): String? {
+        val resolver = getApplication<Application>().contentResolver
+        return resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
+    private fun sizeForUri(uri: Uri): Long {
+        val resolver = getApplication<Application>().contentResolver
+        return resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else -1L
+        } ?: -1L
+    }
+}
+
+private class StreamingUriRequestBody(
+    private val context: Context,
+    private val uri: Uri,
+    private val mimeType: String,
+    private val size: Long,
+    private val onProgress: (sent: Long, total: Long) -> Unit
+) : RequestBody() {
+    override fun contentType() = mimeType.toMediaTypeOrNull()
+    override fun contentLength() = size
+
+    override fun writeTo(sink: BufferedSink) {
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var uploaded = 0L
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                sink.write(buffer, 0, read)
+                uploaded += read
+                onProgress(uploaded, size)
+            }
+        } ?: error("Cannot open selected file")
     }
 }

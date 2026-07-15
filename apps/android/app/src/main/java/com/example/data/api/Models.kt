@@ -279,6 +279,14 @@ data class AdminNotificationRequest(
 )
 
 @JsonClass(generateAdapter = true)
+data class AdminTrimJobRequest(
+    val assetId: String,
+    val startSeconds: Double,
+    val endSeconds: Double,
+    val title: String? = null
+)
+
+@JsonClass(generateAdapter = true)
 data class AdminSettingsUpdateRequest(
     val deleteOriginalAfterPreview: Boolean? = null,
     val maintenanceMode: Boolean? = null,

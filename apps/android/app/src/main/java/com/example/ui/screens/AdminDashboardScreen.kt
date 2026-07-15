@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,6 +70,7 @@ import com.example.ui.theme.SecureTextGray
 import com.example.ui.theme.SecureTextWhite
 import com.example.ui.viewmodel.AdminDashboardState
 import com.example.ui.viewmodel.AdminPanelData
+import com.example.ui.viewmodel.AdminUploadState
 import com.example.ui.viewmodel.SecureStreamViewModel
 import kotlinx.coroutines.delay
 
@@ -109,8 +112,8 @@ fun AdminDashboardScreen(
     LaunchedEffect(Unit) {
         viewModel.loadAdminDashboard()
         while (true) {
-            delay(15000)
-            viewModel.loadAdminDashboard()
+            delay(5000)
+            viewModel.loadAdminDashboard(silent = true)
         }
     }
 
@@ -130,7 +133,7 @@ fun AdminDashboardScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { viewModel.loadAdminDashboard() }) {
+                    IconButton(onClick = { viewModel.loadAdminDashboard(silent = true) }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = SecureMintAccent)
                     }
                 },
@@ -218,14 +221,17 @@ private fun AdminOverviewTab(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                 AdminMetricCard("Devices", "${devices.size}", "active sessions", Icons.Filled.Devices, Modifier.weight(1f))
-                AdminMetricCard("CPU", "${system?.cpu?.usedPercent ?: 0}%", "${system?.cpu?.cores ?: "-"} cores", Icons.Filled.Memory, Modifier.weight(1f))
+                AdminMetricCard("Server", system?.host?.hostname ?: "-", "current host", Icons.Filled.Memory, Modifier.weight(1f))
             }
         }
         item {
-            UsageCard("Memory", system?.memory?.usedPercent ?: 0, formatBytes(system?.memory?.usedBytes), formatBytes(system?.memory?.totalBytes))
+            UsageCard("CPU", system?.cpu?.usedPercent ?: 0, "${system?.cpu?.cores ?: "-"} cores", "current load")
         }
         item {
-            UsageCard("Storage", system?.storage?.usedPercent ?: 0, formatBytes(system?.storage?.usedBytes), formatBytes(system?.storage?.totalBytes))
+            UsageCard("Memory", system?.memory?.usedPercent ?: 0, formatBytes(system?.memory?.usedBytes), "of ${formatBytes(system?.memory?.totalBytes)}")
+        }
+        item {
+            UsageCard("Storage", system?.storage?.usedPercent ?: 0, formatBytes(system?.storage?.usedBytes), "of ${formatBytes(system?.storage?.totalBytes)}")
         }
         item {
             AdminCard {
@@ -430,6 +436,7 @@ private fun GenericRecordCard(row: Map<String, Any?>) {
 @Composable
 private fun AdminPanelActions(viewModel: SecureStreamViewModel, title: String, panel: AdminPanelData) {
     val context = LocalContext.current
+    val uploadState by viewModel.adminUploadState.collectAsState()
     val ok: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
     val fail: (String) -> Unit = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
 
@@ -510,17 +517,103 @@ private fun AdminPanelActions(viewModel: SecureStreamViewModel, title: String, p
             }
         }
         "Uploads" -> {
+            var uploadTitle by remember { mutableStateOf("") }
+            var uploadSynopsis by remember { mutableStateOf("") }
+            var selectedVideoUri by remember { mutableStateOf<android.net.Uri?>(null) }
+            val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+                selectedVideoUri = uri
+                if (uploadTitle.isBlank()) {
+                    uploadTitle = uri?.lastPathSegment?.substringAfterLast("/")?.substringBeforeLast(".") ?: "Uploaded video"
+                }
+            }
             AdminCard {
                 Text("Mobile upload", color = SecureTextWhite, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                Text("Upload controls need Android file picker integration. For now, use the web panel for large video uploads.", color = SecureTextGray)
+                Text("Pick a video from this phone and upload it as a draft. Publish it after preview conversion is ready.", color = SecureTextGray)
+                Spacer(Modifier.height(10.dp))
+                AdminActionButton(label = if (selectedVideoUri == null) "Choose video" else "Change video") {
+                    picker.launch("video/*")
+                }
+                selectedVideoUri?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Selected: ${it.lastPathSegment ?: "video"}", color = SecureMintAccent, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(uploadTitle, { uploadTitle = it }, "Title")
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(uploadSynopsis, { uploadSynopsis = it }, "Storyline / notes")
+                Spacer(Modifier.height(10.dp))
+                if (uploadState.running || uploadState.progress > 0) {
+                    UploadProgress(uploadState)
+                    Spacer(Modifier.height(10.dp))
+                }
+                AdminActionButton(
+                    label = if (uploadState.running) uploadState.phase.ifBlank { "Uploading..." } else "Upload as draft",
+                    enabled = !uploadState.running && selectedVideoUri != null && uploadTitle.isNotBlank()
+                ) {
+                    val uri = selectedVideoUri
+                    if (uri != null) {
+                        viewModel.adminUploadVideo(uri, uploadTitle, uploadSynopsis, { message ->
+                            selectedVideoUri = null
+                            uploadTitle = ""
+                            uploadSynopsis = ""
+                            ok(message)
+                        }, fail)
+                    }
+                }
             }
         }
         "Video Editor" -> {
+            val assets = recordList(panel.details["assets"])
+            var selectedAssetId by remember { mutableStateOf(firstString(assets.firstOrNull().orEmpty(), "id").orEmpty()) }
+            var startSeconds by remember { mutableStateOf("0") }
+            var endSeconds by remember { mutableStateOf("") }
+            var outputTitle by remember { mutableStateOf("") }
             AdminCard {
                 Text("Mobile editor", color = SecureTextWhite, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                Text("Trim job creation needs a dedicated touch timeline. Job monitoring is enabled here; editing controls can be added next.", color = SecureTextGray)
+                Text("Create a trimmed draft copy from an uploaded video. The original file is not changed.", color = SecureTextGray)
+                Spacer(Modifier.height(10.dp))
+                Text("Choose source", color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(6.dp))
+                assets.take(6).forEach { asset ->
+                    val assetId = firstString(asset, "id").orEmpty()
+                    val label = firstString(asset, "title", "sourceFileName", "previewFileName") ?: assetId
+                    AdminActionButton(
+                        label = if (assetId == selectedAssetId) "✓ $label" else label,
+                        enabled = assetId.isNotBlank()
+                    ) {
+                        selectedAssetId = assetId
+                        if (outputTitle.isBlank()) outputTitle = "$label clip"
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                if (assets.isEmpty()) {
+                    Text("No uploaded video assets yet. Upload a video first.", color = SecureTextGray)
+                }
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(selectedAssetId, { selectedAssetId = it }, "Asset ID")
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Box(Modifier.weight(1f)) { AdminTextField(startSeconds, { startSeconds = it }, "Start sec") }
+                    Box(Modifier.weight(1f)) { AdminTextField(endSeconds, { endSeconds = it }, "End sec") }
+                }
+                Spacer(Modifier.height(8.dp))
+                AdminTextField(outputTitle, { outputTitle = it }, "Edited draft title")
+                Spacer(Modifier.height(10.dp))
+                AdminActionButton(
+                    label = "Create trimmed draft",
+                    enabled = selectedAssetId.isNotBlank() && endSeconds.toDoubleOrNull() != null
+                ) {
+                    viewModel.adminCreateTrimJob(
+                        assetId = selectedAssetId,
+                        startSeconds = startSeconds.toDoubleOrNull() ?: 0.0,
+                        endSeconds = endSeconds.toDoubleOrNull() ?: 0.0,
+                        title = outputTitle,
+                        onSuccess = ok,
+                        onError = fail
+                    )
+                }
             }
         }
     }
@@ -580,15 +673,32 @@ private fun AdminDangerButton(label: String, modifier: Modifier = Modifier, onCl
 }
 
 @Composable
-private fun UsageCard(title: String, percent: Int, used: String, total: String) {
+private fun UploadProgress(state: AdminUploadState) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(state.phase.ifBlank { "Working" }, color = SecureTextWhite, fontWeight = FontWeight.Bold)
+            Text("${state.progress.coerceIn(0, 100)}%", color = SecureMintAccent, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(8.dp))
+        LinearProgressIndicator(
+            progress = { state.progress.coerceIn(0, 100) / 100f },
+            color = SecureMintAccent,
+            trackColor = SecureDarkBackground,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+private fun UsageCard(title: String, percent: Int, value: String, caption: String) {
     AdminCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Storage, contentDescription = null, tint = SecureMintAccent)
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, color = SecureTextWhite, fontWeight = FontWeight.Bold)
-                Text("$used used of $total", color = SecureTextGray, style = MaterialTheme.typography.labelMedium)
-            }
+                Icon(Icons.Filled.Storage, contentDescription = null, tint = SecureMintAccent)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, color = SecureTextWhite, fontWeight = FontWeight.Bold)
+                    Text("$value $caption", color = SecureTextGray, style = MaterialTheme.typography.labelMedium)
+                }
             Text("$percent%", color = SecureMintAccent, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(10.dp))
@@ -648,6 +758,13 @@ private fun firstString(row: Map<String, Any?>, vararg keys: String): String? {
         if (value != null && value !is Map<*, *> && value !is List<*>) return value.toString()
     }
     return null
+}
+
+private fun recordList(value: Any?): List<Map<String, Any?>> {
+    return (value as? List<*>)?.mapNotNull { item ->
+        @Suppress("UNCHECKED_CAST")
+        item as? Map<String, Any?>
+    } ?: emptyList()
 }
 
 private fun compactValue(value: Any?): String {

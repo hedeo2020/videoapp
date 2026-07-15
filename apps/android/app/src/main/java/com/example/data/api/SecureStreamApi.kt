@@ -5,12 +5,18 @@ import com.example.config.AppConfig
 import com.example.data.storage.TokenManager
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
+import okhttp3.ResponseBody
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.Header
+import retrofit2.http.Multipart
+import retrofit2.http.Part
 import retrofit2.http.POST
 import retrofit2.http.Query
 import retrofit2.http.PATCH
@@ -175,6 +181,26 @@ interface SecureStreamApi {
 
     @GET("admin/settings")
     suspend fun getAdminSettingsRaw(): Map<String, @JvmSuppressWildcards Any?>
+
+    @Multipart
+    @POST("admin/uploads/direct")
+    suspend fun uploadAdminVideoDirect(
+        @Header("x-upload-id") uploadId: String,
+        @Part file: MultipartBody.Part,
+        @Part("title") title: RequestBody,
+        @Part("synopsis") synopsis: RequestBody,
+        @Part("maturityRating") maturityRating: RequestBody
+    ): ResponseBody
+
+    @GET("admin/uploads/{id}/progress")
+    suspend fun getAdminUploadProgress(
+        @Path("id") id: String
+    ): Map<String, @JvmSuppressWildcards Any?>
+
+    @POST("admin/editor/jobs/trim")
+    suspend fun createAdminTrimJob(
+        @Body request: AdminTrimJobRequest
+    ): ResponseBody
 
     @GET("admin/editor/jobs")
     suspend fun getAdminEditorJobsRaw(): List<Map<String, @JvmSuppressWildcards Any?>>
