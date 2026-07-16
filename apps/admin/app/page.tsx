@@ -112,6 +112,19 @@ function Dashboard({ admin }: { admin: Admin }) {
   const mainRef = useRef<HTMLElement | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
 
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 900px)");
+    if (mobile.matches) setSidebarHidden(true);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !sidebarHidden) setSidebarHidden(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarHidden]);
+
   const metrics = useMemo(() => [
     ["Videos", count(data.movies), "catalog"],
     ["Series", count(data.series), "episodic"],
@@ -831,8 +844,9 @@ function Dashboard({ admin }: { admin: Admin }) {
 
   return (
     <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
-      <aside>
-        <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={(event) => { animatePress(event); setSidebarHidden(true); }} title="Hide admin panel">‹</button></div>
+      {!sidebarHidden && <button className="sidebar-backdrop" type="button" aria-label="Close navigation" onClick={() => setSidebarHidden(true)} />}
+      <aside id="admin-navigation" aria-label="Administration navigation">
+        <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" type="button" onClick={(event) => { animatePress(event); setSidebarHidden(true); }} aria-label="Hide admin navigation" title="Hide admin navigation">‹</button></div>
         <nav className="navgroups">{navGroups.map((group) => {
           const expanded = !collapsedNavGroups[group.label];
           const hasActiveItem = group.items.includes(active);
@@ -845,16 +859,16 @@ function Dashboard({ admin }: { admin: Admin }) {
             {expanded && <div className="navgroup-items">
               {group.items.map((item) => {
                 const badge = item === "Messages" ? unreadMessages : 0;
-                return <button className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); }}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
+                return <button type="button" aria-current={item === active ? "page" : undefined} className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); if (window.matchMedia("(max-width: 900px)").matches) setSidebarHidden(true); }}><span>{item}</span>{badge > 0 && <b className="navbadge" aria-label={`${badge} unread messages`}>{badge > 99 ? "99+" : badge}</b>}</button>;
               })}
             </div>}
           </section>
         );})}</nav>
         <div className="operator"><span>{admin.displayName.slice(0, 2).toUpperCase()}</span><div><b>{admin.displayName}</b><small>{admin.role.replace("_", " ").toLowerCase()}</small></div></div>
       </aside>
-      <main ref={mainRef}>
+      <main ref={mainRef} id="admin-content">
         <header>
-          <div className="headtitle"><button className="menu-toggle" onClick={(event) => { animatePress(event); setSidebarHidden((hidden) => !hidden); }}>{sidebarHidden ? "☰ Show panel" : "☰ Hide panel"}</button><div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>{unreadMessages > 0 && <span className="messagepill">{unreadMessages} unread message{unreadMessages === 1 ? "" : "s"}</span>}</div>
+          <div className="headtitle"><button className="menu-toggle" type="button" aria-controls="admin-navigation" aria-expanded={!sidebarHidden} onClick={(event) => { animatePress(event); setSidebarHidden((hidden) => !hidden); }}><span aria-hidden="true">☰</span> {sidebarHidden ? "Menu" : "Hide menu"}</button><div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>{unreadMessages > 0 && <span className="messagepill">{unreadMessages} unread message{unreadMessages === 1 ? "" : "s"}</span>}</div>
           <div className="actions"><button onClick={(event) => { animatePress(event); void load(active); }} disabled={loading}>{loading ? "Refreshing..." : "Refresh"}</button><button className="primary" onClick={(event) => { animatePress(event); setActive("Uploads"); }}>+ Upload</button></div>
         </header>
         {notice && <div ref={noticeRef} className="formnote workspace-note">{notice}</div>}
