@@ -1,6 +1,7 @@
 "use client";
 
-import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { animate, stagger } from "animejs";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
 const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Storage", "Series", "Uploads", "Processing", "Collections", "Users", "Device Sessions", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Activity", "Trash", "Audit logs", "Security", "Settings"] as const;
@@ -100,6 +101,8 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(null);
   const [editing, setEditing] = useState<RecordItem | null>(null);
   const [newApiToken, setNewApiToken] = useState("");
+  const mainRef = useRef<HTMLElement | null>(null);
+  const noticeRef = useRef<HTMLDivElement | null>(null);
 
   const metrics = useMemo(() => [
     ["Videos", count(data.movies), "catalog"],
@@ -195,6 +198,34 @@ function Dashboard({ admin }: { admin: Admin }) {
     const timer = setInterval(() => void refreshConversations(), 5000);
     return () => { cancelled = true; clearInterval(timer); };
   }, []);
+
+  useEffect(() => {
+    if (prefersReducedMotion() || !mainRef.current) return;
+    const targets = mainRef.current.querySelectorAll(".metrics article,.panel,.workspace-note");
+    animate(targets, {
+      opacity: [0, 1],
+      translateY: [14, 0],
+      scale: [0.985, 1],
+      duration: 520,
+      delay: stagger(28),
+      ease: "outCubic",
+    });
+  }, [active]);
+
+  useEffect(() => {
+    if (!notice || prefersReducedMotion() || !noticeRef.current) return;
+    animate(noticeRef.current, {
+      opacity: [0, 1],
+      translateY: [-8, 0],
+      duration: 320,
+      ease: "outCubic",
+    });
+  }, [notice]);
+
+  function animatePress(event: MouseEvent<HTMLButtonElement>) {
+    if (prefersReducedMotion()) return;
+    animate(event.currentTarget, { scale: [0.97, 1], duration: 260, ease: "outBack" });
+  }
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -789,19 +820,19 @@ function Dashboard({ admin }: { admin: Admin }) {
   return (
     <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
       <aside>
-        <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={() => setSidebarHidden(true)} title="Hide admin panel">‹</button></div>
+        <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={(event) => { animatePress(event); setSidebarHidden(true); }} title="Hide admin panel">‹</button></div>
         <nav>{nav.map((item) => {
           const badge = item === "Messages" ? unreadMessages : 0;
-          return <button className={item === active ? "active" : ""} key={item} onClick={() => setActive(item)}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
+          return <button className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); }}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
         })}</nav>
         <div className="operator"><span>{admin.displayName.slice(0, 2).toUpperCase()}</span><div><b>{admin.displayName}</b><small>{admin.role.replace("_", " ").toLowerCase()}</small></div></div>
       </aside>
-      <main>
+      <main ref={mainRef}>
         <header>
-          <div className="headtitle"><button className="menu-toggle" onClick={() => setSidebarHidden((hidden) => !hidden)}>{sidebarHidden ? "☰ Show panel" : "☰ Hide panel"}</button><div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>{unreadMessages > 0 && <span className="messagepill">{unreadMessages} unread message{unreadMessages === 1 ? "" : "s"}</span>}</div>
-          <div className="actions"><button onClick={() => load(active)} disabled={loading}>{loading ? "Refreshing..." : "Refresh"}</button><button className="primary" onClick={() => setActive("Uploads")}>+ Upload</button></div>
+          <div className="headtitle"><button className="menu-toggle" onClick={(event) => { animatePress(event); setSidebarHidden((hidden) => !hidden); }}>{sidebarHidden ? "☰ Show panel" : "☰ Hide panel"}</button><div><small>OPERATIONS CENTER</small><h1>{active}</h1><p>{panelSubtitle(active)}</p></div>{unreadMessages > 0 && <span className="messagepill">{unreadMessages} unread message{unreadMessages === 1 ? "" : "s"}</span>}</div>
+          <div className="actions"><button onClick={(event) => { animatePress(event); void load(active); }} disabled={loading}>{loading ? "Refreshing..." : "Refresh"}</button><button className="primary" onClick={(event) => { animatePress(event); setActive("Uploads"); }}>+ Upload</button></div>
         </header>
-        {notice && <div className="formnote workspace-note">{notice}</div>}
+        {notice && <div ref={noticeRef} className="formnote workspace-note">{notice}</div>}
         {active === "Overview" && <Overview metrics={metrics} data={data} loading={loading} onCleanup={runStorageCleanup} />}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && <EditMoviePanel movie={editing} loading={loading} onCancel={() => setEditing(null)} onSubmit={updateMovie} />}
@@ -1725,4 +1756,8 @@ function sessionVideoTitle(asset?: RecordItem) {
   const movie = asset?.movie as RecordItem | undefined;
   const episode = asset?.episode as RecordItem | undefined;
   return String(movie?.title ?? episode?.title ?? asset?.id ?? "Unknown video");
+}
+
+function prefersReducedMotion() {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }

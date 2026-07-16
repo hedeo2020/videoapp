@@ -1,1 +1,1 @@
-{"name":"securestream","private":true,"packageManager":"pnpm@11.7.0","scripts":{"dev":"pnpm -r --parallel dev","build":"pnpm -r build","lint":"pnpm -r lint","test":"pnpm -r test","typecheck":"pnpm -r typecheck"},"devDependencies":{"typescript":"^5.8.3"}}
+{"name":"securestream","private":true,"packageManager":"pnpm@11.7.0","scripts":{"dev":"pnpm -r --parallel dev","build":"pnpm -r build","lint":"pnpm -r lint","test":"pnpm -r test","typecheck":"pnpm -r typecheck"},"devDependencies":{"typescript":"^5.8.3"},"dependencies":{"animejs":"^4.5.0"}}
