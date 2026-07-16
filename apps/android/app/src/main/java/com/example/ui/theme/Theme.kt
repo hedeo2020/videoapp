@@ -5,10 +5,14 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
 private val SecureColorScheme = darkColorScheme(
-    primary = SecureMintAccent,
-    onPrimary = SecureDarkBackground,
-    secondary = SecureMintAccent,
+    primary = SecureBrandAccent,
+    onPrimary = SecureTextWhite,
+    primaryContainer = SecureBrandAccentContainer,
+    onPrimaryContainer = SecureTextWhite,
+    secondary = SecureBrandAccentSoft,
     onSecondary = SecureDarkBackground,
+    secondaryContainer = SecureBrandAccentContainer,
+    onSecondaryContainer = SecureTextWhite,
     background = SecureDarkBackground,
     onBackground = SecureTextWhite,
     surface = SecureDarkSurface,

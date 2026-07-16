@@ -1,9 +1,16 @@
 package com.example.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,6 +26,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
@@ -47,9 +55,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -64,6 +74,7 @@ import com.example.R
 import com.example.config.AppConfig
 import com.example.data.api.MovieCardDto
 import com.example.data.api.RailDto
+import com.example.ui.components.ShimmerPlaceholder
 import com.example.ui.theme.SecureDarkBackground
 import com.example.ui.theme.SecureDarkGray
 import com.example.ui.theme.SecureDarkSurface
@@ -269,11 +280,13 @@ fun CatalogScreen(
                                         contentPadding = PaddingValues(horizontal = 20.dp),
                                         horizontalArrangement = Arrangement.spacedBy(16.dp)
                                     ) {
-                                        items(offlineMovies) { item ->
-                                            MovieCatalogCard(
-                                                movie = item,
-                                                onClick = { onNavigateToDetail(item) }
-                                            )
+                                        itemsIndexed(offlineMovies, key = { _, item -> item.id }) { index, item ->
+                                            StaggeredRailItem(index = index) {
+                                                MovieCatalogCard(
+                                                    movie = item,
+                                                    onClick = { onNavigateToDetail(item) }
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -376,13 +389,33 @@ fun CatalogRailSection(
             contentPadding = PaddingValues(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            items(rail.items) { item ->
-                MovieCatalogCard(
-                    movie = item,
-                    onClick = { onMovieClick(item) }
-                )
+            itemsIndexed(rail.items, key = { _, item -> item.id }) { index, item ->
+                StaggeredRailItem(index = index) {
+                    MovieCatalogCard(
+                        movie = item,
+                        onClick = { onMovieClick(item) }
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+fun StaggeredRailItem(
+    index: Int,
+    content: @Composable () -> Unit
+) {
+    AnimatedVisibility(
+        visible = true,
+        enter = fadeIn(
+            animationSpec = tween(durationMillis = 240, delayMillis = (index * 40).coerceAtMost(280))
+        ) + slideInHorizontally(
+            animationSpec = tween(durationMillis = 240, delayMillis = (index * 40).coerceAtMost(280)),
+            initialOffsetX = { it / 5 }
+        )
+    ) {
+        content()
     }
 }
 
@@ -443,10 +476,23 @@ fun MovieCatalogCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val cardScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.97f else 1f,
+        animationSpec = tween(durationMillis = 120),
+        label = "movie_card_press_scale"
+    )
+
     Card(
         modifier = modifier
             .width(160.dp)
-            .clickable(onClick = onClick)
+            .scale(cardScale)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
+            )
             .testTag("movie_card_${movie.id}"),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = SecureDarkSurface),
@@ -462,8 +508,15 @@ fun MovieCatalogCard(
                 val imageUrl = normalizeImageUrl(bestImageUrl(movie))
                 if (imageUrl != null) {
                     val isError = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                    val isLoading = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
                     if (!isError.value) {
                         Box(modifier = Modifier.fillMaxSize()) {
+                            if (isLoading.value) {
+                                ShimmerPlaceholder(
+                                    modifier = Modifier.fillMaxSize(),
+                                    cornerRadius = 0.dp
+                                )
+                            }
                             AsyncImage(
                                 model = imageUrl,
                                 contentDescription = "Poster of ${movie.title}",
@@ -471,6 +524,7 @@ fun MovieCatalogCard(
                                 modifier = Modifier.fillMaxSize(),
                                 onState = { state ->
                                     isError.value = state is coil.compose.AsyncImagePainter.State.Error
+                                    isLoading.value = state is coil.compose.AsyncImagePainter.State.Loading
                                 }
                             )
                             // Subtle dark gradient overlay so text at the bottom is highly readable
@@ -594,16 +648,26 @@ fun FeaturedHeroBanner(
         val heroUrl = featuredMovie?.let { normalizeImageUrl(bestFeaturedImageUrl(it)) }
         if (heroUrl != null) {
             val isError = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+            val isLoading = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
             if (!isError.value) {
-                AsyncImage(
-                    model = heroUrl,
-                    contentDescription = "Featured Video Backdrop",
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
-                    onState = { state ->
-                        isError.value = state is coil.compose.AsyncImagePainter.State.Error
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (isLoading.value) {
+                        ShimmerPlaceholder(
+                            modifier = Modifier.fillMaxSize(),
+                            cornerRadius = 18.dp
+                        )
                     }
-                )
+                    AsyncImage(
+                        model = heroUrl,
+                        contentDescription = "Featured Video Backdrop",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        onState = { state ->
+                            isError.value = state is coil.compose.AsyncImagePainter.State.Error
+                            isLoading.value = state is coil.compose.AsyncImagePainter.State.Loading
+                        }
+                    )
+                }
             } else {
                 Image(
                     painter = painterResource(id = R.drawable.img_hero_banner_1783901726010),

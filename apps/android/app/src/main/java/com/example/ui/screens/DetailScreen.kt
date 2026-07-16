@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.data.api.MovieCardDto
 import com.example.data.api.PlaybackSessionResponse
+import com.example.ui.components.ShimmerPlaceholder
 import com.example.ui.theme.SecureDarkBackground
 import com.example.ui.theme.SecureDarkGray
 import com.example.ui.theme.SecureDarkSurface
@@ -123,16 +124,26 @@ fun DetailScreen(
                 val imageUrl = normalizeImageUrl(bestFeaturedImageUrl(movie))
                 if (imageUrl != null) {
                     val isError = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+                    val isLoading = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(true) }
                     if (!isError.value) {
-                        AsyncImage(
-                            model = imageUrl,
-                            contentDescription = "Cover photo of ${movie.title}",
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                            onState = { state ->
-                                isError.value = state is coil.compose.AsyncImagePainter.State.Error
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (isLoading.value) {
+                                ShimmerPlaceholder(
+                                    modifier = Modifier.fillMaxSize(),
+                                    cornerRadius = 0.dp
+                                )
                             }
-                        )
+                            AsyncImage(
+                                model = imageUrl,
+                                contentDescription = "Cover photo of ${movie.title}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                                onState = { state ->
+                                    isError.value = state is coil.compose.AsyncImagePainter.State.Error
+                                    isLoading.value = state is coil.compose.AsyncImagePainter.State.Loading
+                                }
+                            )
+                        }
                     } else {
                         Box(
                             modifier = Modifier.fillMaxSize(),

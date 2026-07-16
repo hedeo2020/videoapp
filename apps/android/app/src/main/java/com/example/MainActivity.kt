@@ -7,6 +7,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -30,6 +34,8 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.AuthState
 import com.example.ui.viewmodel.PlaybackState
 import com.example.ui.viewmodel.SecureStreamViewModel
+
+private const val ScreenTransitionMillis = 220
 
 class MainActivity : ComponentActivity() {
 
@@ -119,7 +125,31 @@ fun SecureStreamApp(viewModel: SecureStreamViewModel) {
 
     NavHost(
         navController = navController,
-        startDestination = if (authState is AuthState.Success) "catalog" else "login"
+        startDestination = if (authState is AuthState.Success) "catalog" else "login",
+        enterTransition = {
+            slideIntoContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Left,
+                animationSpec = tween(ScreenTransitionMillis)
+            ) + fadeIn(animationSpec = tween(ScreenTransitionMillis))
+        },
+        exitTransition = {
+            slideOutOfContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Left,
+                animationSpec = tween(ScreenTransitionMillis)
+            ) + fadeOut(animationSpec = tween(ScreenTransitionMillis))
+        },
+        popEnterTransition = {
+            slideIntoContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Right,
+                animationSpec = tween(ScreenTransitionMillis)
+            ) + fadeIn(animationSpec = tween(ScreenTransitionMillis))
+        },
+        popExitTransition = {
+            slideOutOfContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Right,
+                animationSpec = tween(ScreenTransitionMillis)
+            ) + fadeOut(animationSpec = tween(ScreenTransitionMillis))
+        }
     ) {
         composable("login") {
             LoginScreen(viewModel = viewModel)
