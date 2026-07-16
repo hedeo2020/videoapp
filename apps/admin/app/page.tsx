@@ -904,13 +904,16 @@ function UploadsPanel({ movies, uploading, uploadProgress, conversionProgress, u
   return (
     <section className="grid">
       <article className="panel upload">
-        <div className="panelhead"><div><h2>Upload videos</h2><p>Create one draft video per selected file.</p></div><b>Batch ready</b></div>
+        <div className="panelhead"><div><h2>Upload videos</h2><p>Use the device&apos;s native file picker. SecureStream does not rebuild the system dialog with custom controls.</p></div><b>Native picker</b></div>
         <form onSubmit={onUpload}>
           <label>Title or batch prefix<input name="title" maxLength={160} placeholder="Optional. Blank uses each filename." /></label>
           <label>Synopsis<textarea name="synopsis" rows={4} /></label>
           <label>Maturity rating<input name="maturityRating" placeholder="PG-13" maxLength={20} /></label>
-          <label>Video files<input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" multiple required /></label>
-          <small>Select one or many videos. Each selected file becomes a separate draft. The server creates an MP4/H.264 preview for browser playback after upload.</small>
+          <label className="nativepicker">
+            <span><b>Video files</b><small>The system file browser opens with its own filename field, disclosure/expanded browser controls, sidebar, and format filter where the browser/OS supports it.</small></span>
+            <input name="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.wmv,.flv" multiple required />
+          </label>
+          <div className="formnote">Allowed formats are passed to the native picker through the browser file-type filter. Select one or many videos; each selected file becomes a separate draft.</div>
           {uploadProgress !== null && <div className={`uploadprogress ${converting ? "processing" : ""}`}><span style={{ width: `${visibleProgress}%` }} /><b>{converting ? `Converting preview... ${visibleProgress}%` : `Uploading ${visibleProgress}%`}</b></div>}
           <button className="primary" disabled={uploading}>{uploading ? uploadPhase || "Working..." : "Upload selected videos"}</button>
         </form>
