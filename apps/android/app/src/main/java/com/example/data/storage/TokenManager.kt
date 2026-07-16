@@ -7,6 +7,9 @@ import androidx.security.crypto.MasterKey
 import java.util.UUID
 
 class TokenManager(context: Context) {
+    var isUsingPlaintextFallback: Boolean = false
+        private set
+
     private val prefs = try {
         val masterKey = MasterKey.Builder(context)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -21,6 +24,7 @@ class TokenManager(context: Context) {
         )
     } catch (e: Exception) {
         Log.e("TokenManager", "Failed to initialize EncryptedSharedPreferences, falling back", e)
+        isUsingPlaintextFallback = true
         context.getSharedPreferences("secure_stream_prefs", Context.MODE_PRIVATE)
     }
 

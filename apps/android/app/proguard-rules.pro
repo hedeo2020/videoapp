@@ -19,3 +19,23 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# SecureStream network and persistence models.
+-keep class com.example.data.api.** { *; }
+-keep class com.example.data.storage.** { *; }
+
+# Retrofit creates implementations for annotated interfaces at runtime.
+-keepattributes RuntimeVisibleAnnotations,RuntimeVisibleParameterAnnotations,Signature,InnerClasses,EnclosingMethod
+-keep interface retrofit2.** { *; }
+-keep class retrofit2.** { *; }
+-dontwarn retrofit2.**
+-dontwarn okhttp3.**
+-dontwarn okio.**
+
+# Moshi reflection/codegen metadata.
+-keep class com.squareup.moshi.** { *; }
+-dontwarn javax.annotation.**
+
+# Room generated implementation classes and entities.
+-keep class * extends androidx.room.RoomDatabase { *; }
+-keep @androidx.room.Entity class * { *; }

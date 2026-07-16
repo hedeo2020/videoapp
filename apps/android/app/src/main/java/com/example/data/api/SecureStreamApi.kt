@@ -207,7 +207,7 @@ interface SecureStreamApi {
 
 
     companion object {
-        private const val BASE_URL = AppConfig.API_BASE_URL
+        private val BASE_URL = AppConfig.API_BASE_URL
 
         fun create(context: Context, tokenManager: TokenManager): SecureStreamApi {
             val moshi = Moshi.Builder()

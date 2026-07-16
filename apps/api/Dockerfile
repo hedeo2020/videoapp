@@ -4,7 +4,7 @@ RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/package.json
-RUN pnpm install --filter @securestream/api... --frozen-lockfile=false
+RUN pnpm install --filter @securestream/api...
 COPY apps/api apps/api
 RUN pnpm --filter @securestream/api build
 FROM node:22-alpine

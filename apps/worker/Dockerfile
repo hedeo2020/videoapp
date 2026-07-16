@@ -3,7 +3,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml ./
 COPY apps/worker/package.json apps/worker/package.json
-RUN pnpm install --filter @securestream/worker... --frozen-lockfile=false
+RUN pnpm install --filter @securestream/worker...
 COPY apps/worker apps/worker
 RUN pnpm --filter @securestream/worker build
 CMD ["pnpm","--filter","@securestream/worker","start"]
