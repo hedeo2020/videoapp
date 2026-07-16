@@ -2,6 +2,15 @@
 
 import { animate, stagger } from "animejs";
 import { type DragEvent, type FormEvent, type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
 const nav = [
@@ -42,6 +51,7 @@ const navGroups: { label: string; items: readonly Tab[] }[] = [
 ];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
+type SystemSample = { time: string; memory: number; storage: number; cpu: number };
 
 export default function App() {
   const [admin, setAdmin] = useState<Admin | null>(null);
@@ -156,6 +166,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [conversionProgress, setConversionProgress] = useState<number | null>(null);
   const [uploadPhase, setUploadPhase] = useState("");
+  const [systemHistory, setSystemHistory] = useState<SystemSample[]>([]);
   const [notice, setNotice] = useState("");
   const [preview, setPreview] = useState<{ title: string; url: string; playable: boolean; format: string } | null>(
     null,
@@ -164,6 +175,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [newApiToken, setNewApiToken] = useState("");
   const mainRef = useRef<HTMLElement | null>(null);
   const noticeRef = useRef<HTMLDivElement | null>(null);
+  const lastSystemSampleRef = useRef("");
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 900px)");
@@ -191,6 +203,12 @@ function Dashboard({ admin }: { admin: Admin }) {
     () => asArray(data.conversations).reduce((total, conversation) => total + Number(conversation.unreadCount ?? 0), 0),
     [data.conversations],
   );
+  const rememberSystemSample = (system: unknown) => {
+    const sample = systemSample(system);
+    if (!sample || sample.time === lastSystemSampleRef.current) return;
+    lastSystemSampleRef.current = sample.time;
+    setSystemHistory((items) => [...items.slice(-29), sample]);
+  };
 
   async function load(tab = active) {
     setLoading(true);
@@ -241,7 +259,10 @@ function Dashboard({ admin }: { admin: Admin }) {
     const refreshSystem = async () => {
       try {
         const system = await apiGet("/admin/system-status");
-        if (!cancelled) setData((current) => ({ ...current, system }));
+        if (!cancelled) {
+          rememberSystemSample(system);
+          setData((current) => ({ ...current, system }));
+        }
       } catch {
         // Keep the existing snapshot visible if one realtime poll misses.
       }
@@ -252,6 +273,9 @@ function Dashboard({ admin }: { admin: Admin }) {
       clearInterval(timer);
     };
   }, [active]);
+  useEffect(() => {
+    if (active === "Overview") rememberSystemSample(data.system);
+  }, [active, data.system]);
   useEffect(() => {
     if (active !== "Video Editor") return;
     const timer = setInterval(() => {
@@ -1190,7 +1214,13 @@ function Dashboard({ admin }: { admin: Admin }) {
           </div>
         )}
         {active === "Overview" && (
-          <Overview metrics={metrics} data={data} loading={loading} onCleanup={runStorageCleanup} />
+          <Overview
+            metrics={metrics}
+            data={data}
+            loading={loading}
+            systemHistory={systemHistory}
+            onCleanup={runStorageCleanup}
+          />
         )}
         {preview && <PreviewModal preview={preview} onClose={() => setPreview(null)} />}
         {editing && (
@@ -1338,11 +1368,13 @@ function Overview({
   metrics,
   data,
   loading,
+  systemHistory,
   onCleanup,
 }: {
   metrics: string[][];
   data: Record<string, unknown>;
   loading: boolean;
+  systemHistory: SystemSample[];
   onCleanup: () => void;
 }) {
   return (
@@ -1351,12 +1383,15 @@ function Overview({
         {metrics.map(([label, value, trend]) => (
           <article key={label}>
             <small>{label}</small>
-            <strong>{value}</strong>
+            <strong>
+              <CountUp value={value} />
+            </strong>
             <em>{trend}</em>
           </article>
         ))}
       </section>
       <SystemStatusPanel system={data.system as RecordItem | undefined} />
+      <SystemHealthChart samples={systemHistory} loading={loading && !data.system} />
       <StorageCleanupPanel cleanup={data.cleanup as RecordItem | undefined} loading={loading} onCleanup={onCleanup} />
       <section className="grid">
         <JsonPanel title="Queue snapshot" value={data.processing} />
@@ -1366,6 +1401,162 @@ function Overview({
         />
       </section>
     </>
+  );
+}
+
+function CountUp({ value }: { value: string }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const target = Number(value);
+  useEffect(() => {
+    if (!ref.current || prefersReducedMotion() || !Number.isFinite(target)) {
+      if (ref.current) ref.current.textContent = value;
+      return;
+    }
+    const state = { current: 0 };
+    const animation = animate(state, {
+      current: target,
+      duration: 620,
+      ease: "outCubic",
+      onUpdate: () => {
+        if (ref.current) ref.current.textContent = String(Math.round(state.current));
+      },
+    });
+    return () => {
+      animation.pause();
+    };
+  }, [target, value]);
+  return (
+    <span ref={ref} className="metric-value">
+      {value}
+    </span>
+  );
+}
+
+function LiveIndicator({ label = "Live" }: { label?: string }) {
+  return (
+    <span className="live-indicator" title={label}>
+      <i className="badge-dot" data-tone="success" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+function SystemHealthChart({ samples, loading }: { samples: SystemSample[]; loading: boolean }) {
+  return (
+    <article className="panel healthchart">
+      <div className="panelhead">
+        <div>
+          <h2>Live resource trend</h2>
+          <p>Real samples from the API system status poll. No fake chart data.</p>
+        </div>
+        <LiveIndicator label="Polling" />
+      </div>
+      {loading ? (
+        <SkeletonBlock lines={4} />
+      ) : samples.length < 2 ? (
+        <EmptyState title="Waiting for samples" message="The chart will draw after two live system-status polls." />
+      ) : (
+        <div className="healthchart-canvas">
+          <ResponsiveContainer width="100%" height={260}>
+            <AreaChart data={samples} margin={{ top: 10, right: 18, bottom: 0, left: -18 }}>
+              <defs>
+                <linearGradient id="memoryFill" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0%" stopColor="var(--color-primary)" stopOpacity={0.28} />
+                  <stop offset="100%" stopColor="var(--color-primary)" stopOpacity={0.02} />
+                </linearGradient>
+                <linearGradient id="cpuFill" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0%" stopColor="var(--color-info)" stopOpacity={0.24} />
+                  <stop offset="100%" stopColor="var(--color-info)" stopOpacity={0.02} />
+                </linearGradient>
+                <linearGradient id="storageFill" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0%" stopColor="var(--color-warning)" stopOpacity={0.18} />
+                  <stop offset="100%" stopColor="var(--color-warning)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="var(--color-border)" strokeDasharray="4 6" vertical={false} />
+              <XAxis dataKey="time" tick={{ fill: "var(--color-text-secondary)", fontSize: 11 }} tickLine={false} />
+              <YAxis
+                domain={[0, 100]}
+                tick={{ fill: "var(--color-text-secondary)", fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+                unit="%"
+              />
+              <Tooltip content={<ChartTooltip />} />
+              <Area
+                type="monotone"
+                dataKey="memory"
+                name="Memory"
+                stroke="var(--color-primary)"
+                strokeWidth={2}
+                fill="url(#memoryFill)"
+                isAnimationActive={!prefersReducedMotion()}
+              />
+              <Area
+                type="monotone"
+                dataKey="cpu"
+                name="CPU"
+                stroke="var(--color-info)"
+                strokeWidth={2}
+                fill="url(#cpuFill)"
+                isAnimationActive={!prefersReducedMotion()}
+              />
+              <Area
+                type="monotone"
+                dataKey="storage"
+                name="Storage"
+                stroke="var(--color-warning)"
+                strokeWidth={2}
+                fill="url(#storageFill)"
+                isAnimationActive={!prefersReducedMotion()}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean;
+  payload?: { dataKey?: string | number; name?: string | number; value?: number | string }[];
+  label?: string | number;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="charttooltip">
+      <b>{label}</b>
+      {payload.map((item) => (
+        <span key={item.dataKey}>
+          {item.name}: {Math.round(Number(item.value ?? 0))}%
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function EmptyState({ title, message }: { title: string; message: string }) {
+  return (
+    <div className="emptystate">
+      <span aria-hidden="true">▱</span>
+      <b>{title}</b>
+      <p>{message}</p>
+    </div>
+  );
+}
+
+function SkeletonBlock({ lines = 3 }: { lines?: number }) {
+  return (
+    <div className="skeleton-block" role="status" aria-label="Loading">
+      {Array.from({ length: lines }, (_, index) => (
+        <span key={index} style={{ width: `${92 - index * 12}%` }} />
+      ))}
+    </div>
   );
 }
 
@@ -1457,7 +1648,9 @@ function SystemStatusPanel({ system }: { system?: RecordItem }) {
           <p>Live API server health, storage, and network snapshot.</p>
         </div>
         <div className="liveclock">
-          <small>Live every second</small>
+          <small>
+            <LiveIndicator label="Live every second" />
+          </small>
           <b>{system?.checkedAt ? formatDate(system.checkedAt) : "Waiting"}</b>
         </div>
       </div>
@@ -3790,6 +3983,20 @@ function cpuLoadPercent(cpu: RecordItem) {
   const cores = Number(cpu.cores ?? 1) || 1;
   const firstLoad = Array.isArray(cpu.loadAverage) ? Number(cpu.loadAverage[0] ?? 0) : 0;
   return Math.min(100, Math.round((firstLoad / cores) * 100));
+}
+function systemSample(value: unknown): SystemSample | null {
+  if (!value || typeof value !== "object") return null;
+  const system = value as RecordItem;
+  const checkedAt = system.checkedAt ? String(system.checkedAt) : new Date().toISOString();
+  const memory = (system.memory ?? {}) as RecordItem;
+  const storage = (system.storage ?? {}) as RecordItem;
+  const cpu = (system.cpu ?? {}) as RecordItem;
+  return {
+    time: formatDate(checkedAt),
+    memory: percent(memory.usedPercent),
+    storage: percent(storage.usedPercent),
+    cpu: cpuLoadPercent(cpu),
+  };
 }
 function formatDuration(seconds: number) {
   const days = Math.floor(seconds / 86400);
