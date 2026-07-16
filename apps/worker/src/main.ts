@@ -1,5 +1,57 @@
-import { Worker } from "bullmq"; import { spawn } from "node:child_process"; import { statfs } from "node:fs/promises";
-const connection={url:process.env.REDIS_URL??"redis://redis:6379"}; const concurrency=Number(process.env.WORKER_CONCURRENCY??1); const minFree=Number(process.env.TEMP_STORAGE_MIN_FREE_BYTES??5368709120); const temp=process.env.TEMP_PROCESSING_DIR??"/data/tmp";
-async function command(bin:string,args:string[]){await new Promise<void>((resolve,reject)=>{const p=spawn(bin,args,{stdio:["ignore","pipe","pipe"]}); let err=""; p.stderr.on("data",d=>err+=String(d).slice(-8000)); p.on("exit",c=>c===0?resolve():reject(new Error(`${bin} exited ${c}: ${err}`)))})}
-const worker=new Worker("video-processing",async job=>{const fs=await statfs(temp); if(fs.bavail*fs.bsize<minFree)throw new Error("Insufficient temporary disk space; processing stopped safely"); const {input,output}=job.data as {input:string;output:string}; await job.updateProgress(5); await command("ffprobe",["-v","error","-show_format","-show_streams","-of","json",input]); await job.updateProgress(20); await command("ffmpeg",["-y","-i",input,"-threads",process.env.FFMPEG_THREADS??"2","-vf","scale=-2:720","-c:v","libx264","-preset","veryfast","-c:a","aac","-f","hls","-hls_time","6","-hls_playlist_type","vod",output]); await job.updateProgress(100); return {output};},{connection,concurrency});
-worker.on("completed",job=>console.log(JSON.stringify({level:"info",event:"job.completed",jobId:job.id}))); worker.on("failed",(job,error)=>console.error(JSON.stringify({level:"error",event:"job.failed",jobId:job?.id,message:error.message}))); console.log(JSON.stringify({level:"info",event:"worker.started",concurrency}));
+import { spawn } from "node:child_process";
+import { statfs } from "node:fs/promises";
+import { Worker } from "bullmq";
+
+const connection = { url: process.env.REDIS_URL ?? "redis://redis:6379" };
+const concurrency = Number(process.env.WORKER_CONCURRENCY ?? 1);
+const minFree = Number(process.env.TEMP_STORAGE_MIN_FREE_BYTES ?? 5368709120);
+const temp = process.env.TEMP_PROCESSING_DIR ?? "/data/tmp";
+async function command(bin: string, args: string[]) {
+  await new Promise<void>((resolve, reject) => {
+    const p = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let err = "";
+    p.stderr.on("data", (d) => (err += String(d).slice(-8000)));
+    p.on("exit", (c) => (c === 0 ? resolve() : reject(new Error(`${bin} exited ${c}: ${err}`))));
+  });
+}
+const worker = new Worker(
+  "video-processing",
+  async (job) => {
+    const fs = await statfs(temp);
+    if (fs.bavail * fs.bsize < minFree) throw new Error("Insufficient temporary disk space; processing stopped safely");
+    const { input, output } = job.data as { input: string; output: string };
+    await job.updateProgress(5);
+    await command("ffprobe", ["-v", "error", "-show_format", "-show_streams", "-of", "json", input]);
+    await job.updateProgress(20);
+    await command("ffmpeg", [
+      "-y",
+      "-i",
+      input,
+      "-threads",
+      process.env.FFMPEG_THREADS ?? "2",
+      "-vf",
+      "scale=-2:720",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-c:a",
+      "aac",
+      "-f",
+      "hls",
+      "-hls_time",
+      "6",
+      "-hls_playlist_type",
+      "vod",
+      output,
+    ]);
+    await job.updateProgress(100);
+    return { output };
+  },
+  { connection, concurrency },
+);
+worker.on("completed", (job) => console.log(JSON.stringify({ level: "info", event: "job.completed", jobId: job.id })));
+worker.on("failed", (job, error) =>
+  console.error(JSON.stringify({ level: "error", event: "job.failed", jobId: job?.id, message: error.message })),
+);
+console.log(JSON.stringify({ level: "info", event: "worker.started", concurrency }));

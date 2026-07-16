@@ -1,1 +1,20 @@
-{"name":"securestream","private":true,"packageManager":"pnpm@11.7.0","scripts":{"dev":"pnpm -r --parallel dev","build":"pnpm -r build","lint":"pnpm -r lint","test":"pnpm -r test","typecheck":"pnpm -r typecheck"},"devDependencies":{"typescript":"^5.8.3"},"dependencies":{"animejs":"^4.5.0"}}
+{
+  "name": "securestream",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "animejs": "^4.5.0"
+  }
+}

@@ -4,8 +4,13 @@ export type CatalogMovie = Movie & { assets?: Pick<VideoAsset, "id" | "state" | 
 export type CatalogSeries = Series;
 export type CatalogCard = ReturnType<typeof toMovieCard> | ReturnType<typeof toSeriesCard>;
 
-export function isCurrentlyAvailable(item: { availabilityStart?: Date | null; availabilityEnd?: Date | null }, now = new Date()) {
-  return (!item.availabilityStart || item.availabilityStart <= now) && (!item.availabilityEnd || item.availabilityEnd > now);
+export function isCurrentlyAvailable(
+  item: { availabilityStart?: Date | null; availabilityEnd?: Date | null },
+  now = new Date(),
+) {
+  return (
+    (!item.availabilityStart || item.availabilityStart <= now) && (!item.availabilityEnd || item.availabilityEnd > now)
+  );
 }
 
 export function movieHasReadyAsset(movie: CatalogMovie) {
@@ -13,7 +18,9 @@ export function movieHasReadyAsset(movie: CatalogMovie) {
 }
 
 export function toMovieCard(movie: CatalogMovie) {
-  const durationSeconds = movie.assets?.find((asset) => asset.state === "READY" && asset.durationSeconds && asset.durationSeconds > 0)?.durationSeconds ?? null;
+  const durationSeconds =
+    movie.assets?.find((asset) => asset.state === "READY" && asset.durationSeconds && asset.durationSeconds > 0)
+      ?.durationSeconds ?? null;
   const durationMinutes = durationSeconds ? Math.max(1, Math.round(durationSeconds / 60)) : null;
   return {
     id: movie.id,

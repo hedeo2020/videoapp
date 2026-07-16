@@ -1,314 +1,3390 @@
-import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, open, readFile, readdir, rm, stat, statfs, unlink } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rm, stat, statfs, unlink } from "node:fs/promises";
 import os from "node:os";
-import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
-import helmet from "@fastify/helmet";
-import cors from "@fastify/cors";
+import { pipeline } from "node:stream/promises";
 import cookie from "@fastify/cookie";
+import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
-import { Queue } from "bullmq";
-import { Prisma, PrismaClient, type Role } from "@prisma/client";
+import { type Prisma, PrismaClient, type Role } from "@prisma/client";
 import argon2 from "argon2";
+import { Queue } from "bullmq";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { SignJWT } from "jose";
 import { z } from "zod";
-import { config } from "./config.js";
 import { isAdminRole, issueSession, publicUser, rotateSession, verifyPasswordAndTrack } from "./auth.js";
-import { isCurrentlyAvailable, movieHasReadyAsset, toMovieCard, toSeriesCard, type CatalogCard } from "./catalog.js";
-import { hashToken, opaqueToken, signAccess, signOfflineDownload, signPlayback, verifyAccess, verifyPlayback } from "./security.js";
+import { type CatalogCard, isCurrentlyAvailable, movieHasReadyAsset, toMovieCard, toSeriesCard } from "./catalog.js";
+import { config } from "./config.js";
 import { hasPermission } from "./rbac.js";
+import {
+  hashToken,
+  opaqueToken,
+  signAccess,
+  signOfflineDownload,
+  signPlayback,
+  verifyAccess,
+  verifyPlayback,
+} from "./security.js";
 
-const prisma=new PrismaClient();
-const processingQueue=new Queue("video-processing",{connection:{url:config.REDIS_URL}});
-const app=Fastify({logger:{level:config.NODE_ENV==="production"?"info":"debug",redact:["req.headers.authorization","req.headers.cookie","res.headers.set-cookie","body.password","body.token","body.refreshToken"]},genReqId:()=>randomUUID(),trustProxy:config.NODE_ENV==="production"?1:false});
-await app.register(helmet,{global:true});
-await app.register(cors,{origin:config.ADMIN_ORIGIN,credentials:true,methods:["GET","POST","PATCH","DELETE"]});
+const prisma = new PrismaClient();
+const processingQueue = new Queue("video-processing", { connection: { url: config.REDIS_URL } });
+const app = Fastify({
+  logger: {
+    level: config.NODE_ENV === "production" ? "info" : "debug",
+    redact: [
+      "req.headers.authorization",
+      "req.headers.cookie",
+      "res.headers.set-cookie",
+      "body.password",
+      "body.token",
+      "body.refreshToken",
+    ],
+  },
+  genReqId: () => randomUUID(),
+  trustProxy: config.NODE_ENV === "production" ? 1 : false,
+});
+await app.register(helmet, { global: true });
+await app.register(cors, {
+  origin: config.ADMIN_ORIGIN,
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+});
 await app.register(cookie);
-await app.register(multipart,{limits:{fileSize:Number(process.env.MAX_UPLOAD_BYTES??10737418240),files:Number(process.env.MAX_UPLOAD_FILES??20)}});
-await app.register(rateLimit,{max:300,timeWindow:"1 minute"});
-
-type Auth={sub:string;role:Role};
-type AuthRequest=FastifyRequest & {auth:Auth};
-const ipHash=(req:FastifyRequest)=>createHash("sha256").update(req.ip).digest("hex");
-const sessionContext=(req:FastifyRequest,deviceId:string)=>({deviceId,userAgent:req.headers["user-agent"],ipHash:ipHash(req)});
-const sendError=(reply:FastifyReply,requestId:string,status:number,code:string,message:string)=>reply.code(status).send({error:{code,message,requestId}});
-const sendAccountStatus=(reply:FastifyReply,requestId:string,status:number,code:string,accountStatus:string,adminMessage:string)=>reply.code(status).send({error:{code,message:adminMessage,requestId,accountStatus,adminMessage},accountStatus,adminMessage});
-const slugify=(input:string)=>input.toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/(^-|-$)/g,"").slice(0,80);
-const contentTypeFor=(key:string)=>{const lower=key.toLowerCase();return lower.endsWith(".mp4")?"video/mp4":lower.endsWith(".webm")?"video/webm":lower.endsWith(".mov")?"video/quicktime":lower.endsWith(".mkv")?"video/x-matroska":lower.endsWith(".m3u8")?"application/vnd.apple.mpegurl":lower.endsWith(".jpg")||lower.endsWith(".jpeg")?"image/jpeg":lower.endsWith(".png")?"image/png":"application/octet-stream"};
-const storagePathFor=(key:string)=>{const root=path.resolve(storageRoot);const filePath=path.resolve(root,key);return filePath.startsWith(root+path.sep)?filePath:null};
-const storageKeyFromMediaImageUrl=(value:string|null|undefined)=>{if(!value)return null;const marker="/api/v1/media/images/";const index=value.indexOf(marker);return index>=0?decodeURIComponent(value.slice(index+marker.length)):null};
-type StorageFile={key:string;path:string;size:number;mtimeMs:number};
-const listStorageFiles=async(dir=storageRoot):Promise<StorageFile[]>=>{let entries:{name:string;isDirectory:()=>boolean;isFile:()=>boolean}[]=[];try{entries=await readdir(dir,{withFileTypes:true})}catch{return []}const nested=await Promise.all(entries.map(async(entry)=>{const full=path.join(dir,entry.name);if(entry.isDirectory())return listStorageFiles(full);if(!entry.isFile())return [];const info=await stat(full).catch(()=>undefined);if(!info)return [];const key=path.relative(storageRoot,full).split(path.sep).join("/");return [{key,path:full,size:info.size,mtimeMs:info.mtimeMs}]}));return nested.flat()};
-const referencedStorageKeys=async()=>{const [assets,uploads,renditions,movies,series]=await Promise.all([prisma.videoAsset.findMany({select:{sourceStorageKey:true,manifestStorageKey:true}}),prisma.upload.findMany({select:{storageKey:true}}),prisma.videoRendition.findMany({select:{storageKey:true}}),prisma.movie.findMany({select:{posterUrl:true,backdropUrl:true}}),prisma.series.findMany({select:{posterUrl:true,backdropUrl:true}})]);return new Set([...assets.flatMap(asset=>[asset.sourceStorageKey,asset.manifestStorageKey]),...uploads.map(upload=>upload.storageKey),...renditions.map(rendition=>rendition.storageKey),...movies.flatMap(movie=>[storageKeyFromMediaImageUrl(movie.posterUrl),storageKeyFromMediaImageUrl(movie.backdropUrl)]),...series.flatMap(item=>[storageKeyFromMediaImageUrl(item.posterUrl),storageKeyFromMediaImageUrl(item.backdropUrl)])].filter(Boolean) as string[])};
-const storageCleanupReport=async(execute=false)=>{const referenced=await referencedStorageKeys();const files=await listStorageFiles();const cutoff=Date.now()-60*60_000;const orphaned=files.filter(file=>!referenced.has(file.key)&&file.mtimeMs<cutoff);let deletedFiles=0,deletedBytes=0;const failed:string[]=[];if(execute){for(const file of orphaned){await unlink(file.path).then(()=>{deletedFiles++;deletedBytes+=file.size}).catch(()=>failed.push(file.key))}const stale=Date.now()-24*60*60_000;for(const [id,item] of conversionProgress)if(item.updatedAt<stale)conversionProgress.delete(id);for(const [id,job] of editorJobs)if(new Date(job.updatedAt).getTime()<stale&&job.status!=="RUNNING"&&job.status!=="QUEUED")editorJobs.delete(id)}return {storageRoot,totalFiles:files.length,referencedFiles:files.length-orphaned.length,orphanedFiles:orphaned.length,reclaimableBytes:orphaned.reduce((sum,file)=>sum+file.size,0),deletedFiles,deletedBytes,failed,preview:orphaned.slice(0,25).map(file=>({key:file.key,sizeBytes:file.size,modifiedAt:new Date(file.mtimeMs).toISOString()}))}};
-const storageBreakdownReport=async()=>{const files=await listStorageFiles();const buckets:{name:string;match:(key:string)=>boolean}[]=[{name:"Backups",match:key=>key.startsWith("backups/")},{name:"Source uploads",match:key=>key.startsWith("uploads/")},{name:"MP4 previews",match:key=>key.startsWith("previews/")||key.endsWith(".mp4")},{name:"Thumbnails",match:key=>key.startsWith("thumbnails/")||key.match(/\.(jpg|jpeg|png|webp)$/i)!==null},{name:"Edited clips",match:key=>key.startsWith("edits/")},{name:"Other",match:()=>true}];const categories=buckets.map(bucket=>({name:bucket.name,files:[] as StorageFile[]}));for(const file of files){const category=categories.find(item=>item.name!=="Other"&&buckets.find(bucket=>bucket.name===item.name)?.match(file.key));(category??categories[categories.length-1]!).files.push(file)}const storage=await statfs(storageRoot).catch(()=>undefined);const totalBytes=storage?storage.blocks*storage.bsize:0;const freeBytes=storage?storage.bavail*storage.bsize:0;const warningPercent=Number(await getSetting("storageWarningPercent",80));return {checkedAt:new Date().toISOString(),storageRoot,totalBytes,freeBytes,usedBytes:Math.max(0,totalBytes-freeBytes),usedPercent:totalBytes?Math.round(((totalBytes-freeBytes)/totalBytes)*100):0,warningPercent,warning:totalBytes?Math.round(((totalBytes-freeBytes)/totalBytes)*100)>=warningPercent:false,categories:categories.filter(category=>category.files.length).map(category=>({name:category.name,fileCount:category.files.length,sizeBytes:category.files.reduce((sum,file)=>sum+file.size,0),largest:category.files.sort((a,b)=>b.size-a.size).slice(0,8).map(file=>({key:file.key,sizeBytes:file.size,modifiedAt:new Date(file.mtimeMs).toISOString()}))}))}};
-const firstHeader=(value:string|string[]|undefined)=>Array.isArray(value)?value[0]:value;
-const absoluteApiUrl=(req:FastifyRequest,pathname:string)=>{const proto=firstHeader(req.headers["x-forwarded-proto"])??(config.NODE_ENV==="production"?"https":"http");const host=firstHeader(req.headers["x-forwarded-host"])??req.headers.host??"localhost:4000";return `${proto}://${host}${pathname}`};
-type ConversionProgress={phase:string;progress:number;updatedAt:number};
-const conversionProgress=new Map<string,ConversionProgress>();
-const rememberConversion=(id:string,phase:string,progress:number)=>conversionProgress.set(id,{phase,progress:Math.max(0,Math.min(100,Math.round(progress))),updatedAt:Date.now()});
-const forgetConversionLater=(id:string)=>setTimeout(()=>conversionProgress.delete(id),10*60_000);
-type EditorJob={id:string;assetId:string;title:string;sourceTitle:string;startSeconds:number;endSeconds:number;status:"QUEUED"|"RUNNING"|"COMPLETED"|"FAILED";progress:number;phase:string;createdAt:string;updatedAt:string;resultMovieId?:string;resultAssetId?:string;error?:string};
-const editorJobs=new Map<string,EditorJob>();
-const rememberEditorJob=(job:EditorJob,phase:string,progress:number,status:EditorJob["status"]=job.status)=>{job.phase=phase;job.progress=Math.max(0,Math.min(100,Math.round(progress)));job.status=status;job.updatedAt=new Date().toISOString();editorJobs.set(job.id,job)};
-const probeDurationSeconds=(input:string)=>new Promise<number|undefined>((resolve)=>{const ffprobe=spawn("ffprobe",["-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",input],{stdio:["ignore","pipe","ignore"]});let output="";ffprobe.stdout.on("data",chunk=>output+=String(chunk));ffprobe.on("error",()=>resolve(undefined));ffprobe.on("close",()=>{const seconds=Number(output.trim());resolve(Number.isFinite(seconds)&&seconds>0?seconds:undefined)})});
-const mp4QualityArgs=process.env.FFMPEG_CRF?["-crf",process.env.FFMPEG_CRF]:[];
-const mp4CompressionArgs=["-c:v","libx264","-preset",process.env.FFMPEG_PRESET??"veryfast",...mp4QualityArgs,"-pix_fmt","yuv420p","-c:a","aac","-b:a",process.env.FFMPEG_AUDIO_BITRATE??"128k","-movflags","+faststart"];
-const generateThumbnail=async(input:string,output:string)=>new Promise<void>((resolve,reject)=>{const ffmpeg=spawn("ffmpeg",["-y","-ss","00:00:01","-i",input,"-frames:v","1","-vf","scale=640:-2","-q:v","3",output],{stdio:["ignore","ignore","pipe"]});let err="";ffmpeg.stderr.on("data",chunk=>err=(err+String(chunk)).slice(-4000));ffmpeg.on("error",reject);ffmpeg.on("close",code=>code===0?resolve():reject(new Error(err||`ffmpeg thumbnail exited with code ${code}`)))});
-const transcodePreview=async(input:string,output:string,onProgress:(progress:number)=>void)=>{const duration=await probeDurationSeconds(input);await new Promise<void>((resolve,reject)=>{const ffmpeg=spawn("ffmpeg",["-y","-i",input,"-map","0:v:0","-map","0:a:0?",...mp4CompressionArgs,"-progress","pipe:2","-nostats",output],{stdio:["ignore","ignore","pipe"]});let err="",buffer="",fallback=0;ffmpeg.stderr.on("data",chunk=>{const text=String(chunk);err=(err+text).slice(-4000);buffer+=text;const lines=buffer.split(/\r?\n/);buffer=lines.pop()??"";for(const line of lines){const separator=line.indexOf("=");if(separator<0)continue;const key=line.slice(0,separator);const value=line.slice(separator+1);if(key==="out_time_ms"&&duration){const seconds=Number(value)/1_000_000;if(Number.isFinite(seconds))onProgress(Math.min(99,(seconds/duration)*100))}else if(key==="progress"&&value==="continue"&&!duration){fallback=Math.min(95,fallback+1);onProgress(fallback)}}});ffmpeg.on("error",reject);ffmpeg.on("close",code=>{if(code===0){onProgress(100);resolve()}else reject(new Error(err||`ffmpeg exited with code ${code}`))})})};
-const trimVideo=async(input:string,output:string,startSeconds:number,endSeconds:number,onProgress:(progress:number)=>void)=>{const trimDuration=Math.max(1,endSeconds-startSeconds);await new Promise<void>((resolve,reject)=>{const ffmpeg=spawn("ffmpeg",["-y","-ss",String(startSeconds),"-i",input,"-t",String(trimDuration),"-map","0:v:0","-map","0:a:0?",...mp4CompressionArgs,"-progress","pipe:2","-nostats",output],{stdio:["ignore","ignore","pipe"]});let err="",buffer="",fallback=0;ffmpeg.stderr.on("data",chunk=>{const text=String(chunk);err=(err+text).slice(-4000);buffer+=text;const lines=buffer.split(/\r?\n/);buffer=lines.pop()??"";for(const line of lines){const separator=line.indexOf("=");if(separator<0)continue;const key=line.slice(0,separator);const value=line.slice(separator+1);if(key==="out_time_ms"){const seconds=Number(value)/1_000_000;if(Number.isFinite(seconds))onProgress(Math.min(99,(seconds/trimDuration)*100))}else if(key==="progress"&&value==="continue"){fallback=Math.min(95,fallback+1);onProgress(fallback)}}});ffmpeg.on("error",reject);ffmpeg.on("close",code=>{if(code===0){onProgress(100);resolve()}else reject(new Error(err||`ffmpeg exited with code ${code}`))})})};
-type MovieWithAssets={assets?:{id:string;state:string;durationSeconds:number|null;manifestStorageKey:string|null;sourceStorageKey:string}[]};
-const ensureMovieDurations=async(movies:MovieWithAssets[])=>{await Promise.all(movies.flatMap(movie=>(movie.assets??[]).filter(asset=>asset.state==="READY"&&!(asset.durationSeconds&&asset.durationSeconds>0)).map(async(asset)=>{const keys=[asset.manifestStorageKey,asset.sourceStorageKey].filter(Boolean) as string[];let duration=0;for(const key of keys){const filePath=storagePathFor(key);if(!filePath)continue;duration=Math.round(await probeDurationSeconds(filePath)??0);if(duration>0)break}if(duration>0){asset.durationSeconds=duration;await prisma.videoAsset.update({where:{id:asset.id},data:{durationSeconds:duration}}).catch(()=>undefined)}})))};
-const backupTables=[["movies","movie"],["series","series"],["seasons","season"],["episodes","episode"],["collections","collection"],["users","user"],["videoAssets","videoAsset"],["videoRenditions","videoRendition"],["collectionItems","collectionItem"],["userMovieAccess","userMovieAccess"],["userCollectionAccess","userCollectionAccess"],["uploads","upload"],["platformSettings","platformSetting"],["supportConversations","supportConversation"],["supportMessages","supportMessage"],["userNotifications","userNotification"],["watchProgress","watchProgress"],["watchHistory","watchHistory"],["myListItems","myListItem"]] as const;
-const backupReplacer=(_key:string,value:unknown)=>typeof value==="bigint"?value.toString():value;
-const tarPad=(size:number)=>size%512===0?0:512-(size%512);
-const tarOctal=(value:number,length:number)=>{const text=value.toString(8).slice(0,length-1);return text.padStart(length-1,"0")+"\0"};
-const tarHeader=(name:string,size:number,mtime=Math.floor(Date.now()/1000))=>{const header=Buffer.alloc(512);let fileName=name,prefix="";if(Buffer.byteLength(name)>100){const slash=name.lastIndexOf("/");if(slash>0){prefix=name.slice(0,slash);fileName=name.slice(slash+1)}}header.write(fileName.slice(0,100),0);header.write(tarOctal(0o644,8),100);header.write(tarOctal(0,8),108);header.write(tarOctal(0,8),116);header.write(tarOctal(size,12),124);header.write(tarOctal(mtime,12),136);header.fill(" ",148,156);header.write("0",156);header.write("ustar\0",257);header.write("00",263);if(prefix)header.write(prefix.slice(0,155),345);let sum=0;for(const byte of header)sum+=byte;header.write(tarOctal(sum,8),148);return header};
-async function writeTarBuffer(out:Awaited<ReturnType<typeof open>>,name:string,buffer:Buffer){await out.write(tarHeader(name,buffer.length));await out.write(buffer);const pad=tarPad(buffer.length);if(pad)await out.write(Buffer.alloc(pad))}
-async function writeTarFile(out:Awaited<ReturnType<typeof open>>,name:string,filePath:string,size:number,mtimeMs:number){await out.write(tarHeader(name,size,Math.floor(mtimeMs/1000)));const input=await open(filePath,"r");try{const chunk=Buffer.alloc(1024*1024);let position=0;while(position<size){const read=await input.read(chunk,0,Math.min(chunk.length,size-position),position);if(!read.bytesRead)break;await out.write(chunk.subarray(0,read.bytesRead));position+=read.bytesRead}}finally{await input.close()}const pad=tarPad(size);if(pad)await out.write(Buffer.alloc(pad))}
-async function backupPayload(){const tables:Record<string,unknown[]>={};for(const [key,model] of backupTables){tables[key]=await (prisma[model] as unknown as {findMany:(args?:unknown)=>Promise<unknown[]>}).findMany()}return {format:"securestream-portable-backup",version:1,createdAt:new Date().toISOString(),notes:"Portable backup stores relative media keys only. It is safe to restore on a server with a different URL or port.",tables}}
-async function createPortableBackup(){const backupsDir=path.join(storageRoot,"backups");await mkdir(backupsDir,{recursive:true});const name=`securestream-backup-${new Date().toISOString().replace(/[:.]/g,"-")}.tar`;const filePath=path.join(backupsDir,name);const media=(await listStorageFiles()).filter(file=>!file.key.startsWith("backups/"));const payload=await backupPayload();const manifest=Buffer.from(JSON.stringify({...payload,media:media.map(file=>({key:file.key,sizeBytes:file.size,modifiedAt:new Date(file.mtimeMs).toISOString()}))},backupReplacer,2));const out=await open(filePath,"w");try{await writeTarBuffer(out,"securestream-backup.json",manifest);for(const file of media)await writeTarFile(out,`media/${file.key}`,file.path,file.size,file.mtimeMs);await out.write(Buffer.alloc(1024))}finally{await out.close()}const info=await stat(filePath);return {name,sizeBytes:info.size,createdAt:new Date(info.mtimeMs).toISOString(),mediaFiles:media.length}}
-const safeBackupName=(name:string)=>name.match(/^securestream-backup-[a-zA-Z0-9_.-]+\.tar$/)?name:null;
-async function listBackups(){const backupsDir=path.join(storageRoot,"backups");await mkdir(backupsDir,{recursive:true});const entries=await readdir(backupsDir,{withFileTypes:true}).catch(()=>[]);const files=await Promise.all(entries.filter(entry=>entry.isFile()&&safeBackupName(entry.name)).map(async(entry)=>{const filePath=path.join(backupsDir,entry.name);const info=await stat(filePath);return {name:entry.name,sizeBytes:info.size,createdAt:new Date(info.mtimeMs).toISOString()}}));return files.sort((a,b)=>b.createdAt.localeCompare(a.createdAt))}
-function driveConfig(){const raw=process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON;const folderId=process.env.GOOGLE_DRIVE_FOLDER_ID;if(!raw||!folderId)return null;const json=raw.trim().startsWith("{")?raw:Buffer.from(raw,"base64").toString("utf8");const account=JSON.parse(json) as {client_email:string;private_key:string;token_uri?:string};return {folderId,clientEmail:account.client_email,privateKey:account.private_key,tokenUri:account.token_uri??"https://oauth2.googleapis.com/token"}}
-async function driveAccessToken(){const drive=driveConfig();if(!drive)throw new Error("Google Drive is not configured. Set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON and GOOGLE_DRIVE_FOLDER_ID.");const key=await crypto.subtle.importKey("pkcs8",Buffer.from(drive.privateKey.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g,""),"base64"),{name:"RSASSA-PKCS1-v1_5",hash:"SHA-256"},false,["sign"]);const assertion=await new SignJWT({scope:"https://www.googleapis.com/auth/drive.file"}).setProtectedHeader({alg:"RS256",typ:"JWT"}).setIssuer(drive.clientEmail).setAudience(drive.tokenUri).setIssuedAt().setExpirationTime("1h").sign(key);const response=await fetch(drive.tokenUri,{method:"POST",headers:{"content-type":"application/x-www-form-urlencoded"},body:new URLSearchParams({grant_type:"urn:ietf:params:oauth:grant-type:jwt-bearer",assertion})});const payload=await response.json() as {access_token?:string;error_description?:string};if(!response.ok||!payload.access_token)throw new Error(payload.error_description??"Google Drive authentication failed");return {token:payload.access_token,folderId:drive.folderId}}
-async function uploadBackupToDrive(name:string){const safe=safeBackupName(name);if(!safe)throw new Error("Backup file name is invalid");const filePath=path.join(storageRoot,"backups",safe);const info=await stat(filePath);const {token,folderId}=await driveAccessToken();const start=await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink,webContentLink",{method:"POST",headers:{authorization:`Bearer ${token}`,"content-type":"application/json; charset=UTF-8","x-upload-content-type":"application/x-tar","x-upload-content-length":String(info.size)},body:JSON.stringify({name:safe,parents:[folderId],mimeType:"application/x-tar"})});if(!start.ok)throw new Error(`Google Drive upload session failed: ${await start.text()}`);const session=start.headers.get("location");if(!session)throw new Error("Google Drive did not return an upload session");const upload=await fetch(session,{method:"PUT",headers:{"content-type":"application/x-tar","content-length":String(info.size)},body:createReadStream(filePath) as unknown as BodyInit,duplex:"half"} as RequestInit&{duplex:"half"});const payload=await upload.json().catch(()=>({})) as Record<string,unknown>;if(!upload.ok)throw new Error(`Google Drive upload failed: ${JSON.stringify(payload)}`);return payload}
-async function validatePortableBackup(tarPath:string){const fh=await open(tarPath,"r");let position=0;let manifest:Record<string,unknown>|undefined;let mediaFiles=0;try{while(true){const header=Buffer.alloc(512);const read=await fh.read(header,0,512,position);if(!read.bytesRead||header.every(byte=>byte===0))break;position+=512;const namePart=header.subarray(0,100).toString().replace(/\0.*$/,"");const prefix=header.subarray(345,500).toString().replace(/\0.*$/,"");const rawName=prefix?`${prefix}/${namePart}`:namePart;const size=parseInt(header.subarray(124,136).toString().replace(/\0.*$/,"").trim()||"0",8);if(!rawName){position+=size+tarPad(size);continue}if(rawName.includes("..")||path.isAbsolute(rawName)||rawName.includes("\\"))throw new Error(`Unsafe backup path: ${rawName}`);if(rawName==="securestream-backup.json"){const buffer=Buffer.alloc(size);await fh.read(buffer,0,size,position);manifest=JSON.parse(buffer.toString())}else if(rawName.startsWith("media/")){const key=rawName.slice("media/".length);if(!key||!storagePathFor(key))throw new Error(`Unsafe media path: ${rawName}`);mediaFiles++}else throw new Error(`Unexpected backup entry: ${rawName}`);position+=size+tarPad(size)}}finally{await fh.close()}if(!manifest||manifest.format!=="securestream-portable-backup"||manifest.version!==1||typeof manifest.tables!=="object")throw new Error("Invalid SecureStream backup file");return {manifest,mediaFiles}}
-async function restoreDatabase(tables:Record<string,unknown[]>) {await prisma.$transaction(async(tx)=>{for(const model of ["userNotification","supportMessage","supportConversation","myListItem","watchHistory","watchProgress","playbackSession","upload","videoRendition","userMovieAccess","userCollectionAccess","collectionItem","videoAsset","episode","season","series","movie","user","collection"])(await (tx[model as keyof typeof tx] as unknown as {deleteMany:()=>Promise<unknown>}).deleteMany());const ordered:Record<string,unknown[]>={...tables,collections:[...(tables.collections??[])].sort((a,b)=>Number(Boolean((a as Record<string,unknown>).parentId))-Number(Boolean((b as Record<string,unknown>).parentId)))};for(const [key,model] of backupTables){const data=(ordered[key]??[]) as never[];if(data.length)await (tx[model] as unknown as {createMany:(args:unknown)=>Promise<unknown>}).createMany({data,skipDuplicates:true})}},{timeout:120_000})}
-async function restorePortableBackup(tarPath:string){const validation=await validatePortableBackup(tarPath);const manifest=validation.manifest;const fh=await open(tarPath,"r");let position=0,mediaFiles=0;try{while(true){const header=Buffer.alloc(512);const read=await fh.read(header,0,512,position);if(!read.bytesRead||header.every(byte=>byte===0))break;position+=512;const namePart=header.subarray(0,100).toString().replace(/\0.*$/,"");const prefix=header.subarray(345,500).toString().replace(/\0.*$/,"");const rawName=prefix?`${prefix}/${namePart}`:namePart;const size=parseInt(header.subarray(124,136).toString().replace(/\0.*$/,"").trim()||"0",8);if(rawName.startsWith("media/")){const key=rawName.slice("media/".length);const destination=storagePathFor(key);if(destination){await mkdir(path.dirname(destination),{recursive:true});const out=await open(destination,"w");try{const chunk=Buffer.alloc(1024*1024);let remaining=size,offset=position;while(remaining>0){const readSize=Math.min(chunk.length,remaining);const part=await fh.read(chunk,0,readSize,offset);if(!part.bytesRead)break;await out.write(chunk.subarray(0,part.bytesRead));remaining-=part.bytesRead;offset+=part.bytesRead}}finally{await out.close()}mediaFiles++}}position+=size+tarPad(size)}}finally{await fh.close()}await restoreDatabase((manifest.tables??{}) as Record<string,unknown[]>);return {restored:true,mediaFiles,tables:Object.fromEntries(Object.entries((manifest.tables??{}) as Record<string,unknown[]>).map(([key,value])=>[key,value.length]))}}
-const adminCookieSameSite=config.NODE_ENV==="production"?"none" as const:"strict" as const;
-const storageRoot=process.env.STORAGE_LOCAL_ROOT??"/data/media";
-const offlineDownloadTtlSeconds=7*24*60*60;
-const apiTokenPrefix="ss_pat_";
-const deleteOriginalAfterPreviewKey="deleteOriginalAfterPreview";
-const getBooleanSetting=async(key:string,fallback=false)=>{const setting=await prisma.platformSetting.findUnique({where:{key}});return typeof setting?.value==="boolean"?setting.value:fallback};
-const setBooleanSetting=(key:string,value:boolean)=>prisma.platformSetting.upsert({where:{key},create:{key,value},update:{value}});
-const getSetting=async<T>(key:string,fallback:T)=>{const setting=await prisma.platformSetting.findUnique({where:{key}});return setting?.value===undefined?fallback:setting.value as T};
-const setSetting=(key:string,value:Prisma.InputJsonValue)=>prisma.platformSetting.upsert({where:{key},create:{key,value},update:{value}});
-const maintenanceSettings=async()=>({enabled:await getBooleanSetting("maintenanceMode",false),message:await getSetting("maintenanceMessage","SecureStream is under maintenance. Please try again later.")});
-const androidUpdateSettings=async()=>({latestVersionName:await getSetting("androidLatestVersionName","1.0.0"),latestVersionCode:await getSetting("androidLatestVersionCode",1),required:await getBooleanSetting("androidUpdateRequired",false),message:await getSetting("androidUpdateMessage","A new SecureStream Android app update is available."),downloadUrl:await getSetting("androidDownloadUrl","")});
-const backupScheduleSettings=async()=>({enabled:await getBooleanSetting("backupScheduleEnabled",false),hour:Number(await getSetting("backupScheduleHour",2)),retentionCount:Number(await getSetting("backupRetentionCount",7)),uploadToDrive:await getBooleanSetting("backupScheduleDrive",false)});
-const alertTargetsConfigured=()=>Boolean(process.env.ALERT_WEBHOOK_URL||process.env.DISCORD_WEBHOOK_URL||(process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID));
-async function sendPlatformAlert(title:string,body:string,metadata?:Record<string,unknown>){const tasks:Promise<unknown>[]=[];const text=`${title}\n${body}`;if(process.env.ALERT_WEBHOOK_URL)tasks.push(fetch(process.env.ALERT_WEBHOOK_URL,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({title,body,metadata,createdAt:new Date().toISOString()})}).catch(()=>undefined));if(process.env.DISCORD_WEBHOOK_URL)tasks.push(fetch(process.env.DISCORD_WEBHOOK_URL,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({username:"SecureStream",content:text,embeds:[{title,description:body,color:8648645,timestamp:new Date().toISOString(),fields:metadata?Object.entries(metadata).slice(0,10).map(([name,value])=>({name,value:String(value).slice(0,1024),inline:true})):[]}]})}).catch(()=>undefined));if(process.env.TELEGRAM_BOT_TOKEN&&process.env.TELEGRAM_CHAT_ID)tasks.push(fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({chat_id:process.env.TELEGRAM_CHAT_ID,text})}).catch(()=>undefined));if(tasks.length)await Promise.all(tasks)}
-const backupScheduleState={lastDate:""};
-async function pruneBackups(retentionCount:number){if(retentionCount<1)return;const backups=await listBackups();for(const backup of backups.slice(retentionCount))await rm(path.join(storageRoot,"backups",backup.name),{force:true}).catch(()=>undefined)}
-async function runScheduledBackupIfDue(){const settings=await backupScheduleSettings();if(!settings.enabled)return;const now=new Date();const date=now.toISOString().slice(0,10);if(backupScheduleState.lastDate===date||now.getHours()<Math.max(0,Math.min(23,settings.hour)))return;backupScheduleState.lastDate=date;try{const backup=await createPortableBackup();await pruneBackups(settings.retentionCount);if(settings.uploadToDrive)await uploadBackupToDrive(backup.name).catch(error=>sendPlatformAlert("SecureStream backup Drive upload failed",error instanceof Error?error.message:"Google Drive upload failed",{backup:backup.name}));await sendPlatformAlert("SecureStream scheduled backup created",`${backup.name} is ready.`,{sizeBytes:backup.sizeBytes,mediaFiles:backup.mediaFiles})}catch(error){await sendPlatformAlert("SecureStream scheduled backup failed",error instanceof Error?error.message:"Backup failed")}}
-const isoDate=z.preprocess((v)=>typeof v==="string"&&v.length?new Date(v):v,z.date()).nullable().optional();
-const catalogBody=z.object({title:z.string().min(1).max(160),synopsis:z.string().min(1).max(3000),slug:z.string().min(1).max(100).optional(),status:z.enum(["DRAFT","PUBLISHED","UNPUBLISHED","ARCHIVED"]).default("DRAFT"),featured:z.boolean().default(false),posterUrl:z.string().url().optional(),backdropUrl:z.string().url().optional(),trailerUrl:z.string().url().optional(),genres:z.array(z.string().min(1).max(40)).max(12).default([]),tags:z.array(z.string().min(1).max(40)).max(24).default([]),maturityRating:z.string().max(20).optional(),availabilityStart:isoDate,availabilityEnd:isoDate});
-const seriesBody=catalogBody.omit({featured:true,trailerUrl:true,maturityRating:true,availabilityStart:true,availabilityEnd:true});
-const userAccessBody=z.object({movieIds:z.array(z.string().uuid()).default([]),collectionIds:z.array(z.string().uuid()).default([])});
-const userWriteBody=z.object({email:z.string().email().optional(),displayName:z.string().min(2).max(80).optional(),password:z.string().min(12).max(128).optional(),role:z.enum(["SUPER_ADMIN","ADMIN","EDITOR","VIEWER"]).optional(),status:z.enum(["ACTIVE","SUSPENDED","DISABLED"]).optional(),accessRestricted:z.boolean().optional(),defaultCollectionId:z.string().uuid().nullable().optional(),access:userAccessBody.optional()});
-
-app.setErrorHandler((error,req,reply)=>{const normalized=error as {statusCode?:number;message?:string;name?:string}; const validation=normalized.name==="ZodError"; const status=validation?400:normalized.statusCode??500; req.log.error({err:error},"request failed"); reply.status(status).send({error:{code:validation?"VALIDATION_ERROR":status===500?"INTERNAL_ERROR":"REQUEST_ERROR",message:status===500?"Unexpected server error":normalized.message??"Request failed",requestId:req.id}})});
-
-async function authenticate(req:FastifyRequest,reply:FastifyReply){const bearer=req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];if(bearer?.startsWith(apiTokenPrefix)){const record=await prisma.apiToken.findUnique({where:{tokenHash:hashToken(bearer)},include:{user:true}});if(!record||record.revokedAt||record.user.status!=="ACTIVE"||record.user.deletedAt||!isAdminRole(record.user.role))return sendError(reply,req.id,401,"TOKEN_INVALID","API token is invalid or revoked");await prisma.apiToken.update({where:{id:record.id},data:{lastUsedAt:new Date()}}).catch(()=>undefined);(req as AuthRequest).auth={sub:record.userId,role:record.user.role};return} const cookieToken=req.cookies[config.ADMIN_COOKIE_NAME]; const raw=bearer??cookieToken; if(!raw)return sendError(reply,req.id,401,"UNAUTHENTICATED","Authentication required"); try{const payload=await verifyAccess(raw); if(!payload.sub||typeof payload.role!=="string")throw new Error("invalid claims");const user=await prisma.user.findUnique({where:{id:String(payload.sub)},select:{id:true,role:true,status:true,deletedAt:true}});if(!user||user.status!=="ACTIVE"||user.deletedAt)return sendError(reply,req.id,401,"ACCOUNT_INACTIVE","Account no longer exists or is disabled");const maintenance=await maintenanceSettings();if(maintenance.enabled&&!isAdminRole(user.role))return sendAccountStatus(reply,req.id,503,"MAINTENANCE_MODE","MAINTENANCE",maintenance.message); (req as AuthRequest).auth={sub:user.id,role:user.role};}catch{return sendError(reply,req.id,401,"TOKEN_INVALID","Session expired")}}
-async function requireActiveSubject(sub:unknown,req:FastifyRequest,reply:FastifyReply){if(typeof sub!=="string")return sendError(reply,req.id,401,"TOKEN_INVALID","Session expired");const user=await prisma.user.findUnique({where:{id:sub},select:{status:true,deletedAt:true}});if(!user||user.status!=="ACTIVE"||user.deletedAt)return sendError(reply,req.id,401,"ACCOUNT_INACTIVE","Account no longer exists or is disabled")}
-const requirePermission=(permission:string)=>async(req:FastifyRequest,reply:FastifyReply)=>{await authenticate(req,reply);if(reply.sent)return; if(!hasPermission((req as AuthRequest).auth.role,permission))return sendError(reply,req.id,403,"FORBIDDEN","Insufficient permission")};
-async function requireCsrf(req:FastifyRequest,reply:FastifyReply){if(req.headers.authorization?.match(/^Bearer (.+)$/))return;const header=req.headers["x-csrf-token"];const cookieValue=req.cookies[config.ADMIN_CSRF_COOKIE_NAME];if(!header||header!==cookieValue)return sendError(reply,req.id,403,"CSRF_INVALID","CSRF validation failed")}
-async function audit(req:AuthRequest,action:string,targetType:string,targetId?:string,metadata?:Prisma.InputJsonValue){await prisma.adminAuditLog.create({data:{actorUserId:req.auth.sub,action,targetType,targetId,requestId:req.id,ipHash:ipHash(req),metadata}})}
-async function userAccessScope(userId:string){const user=await prisma.user.findUnique({where:{id:userId},select:{accessRestricted:true}});if(!user?.accessRestricted)return null;const [movies,collections]=await Promise.all([prisma.userMovieAccess.findMany({where:{userId},select:{movieId:true}}),prisma.userCollectionAccess.findMany({where:{userId},select:{collectionId:true}})]);const ids=new Set(movies.map(item=>item.movieId));if(collections.length){const items=await prisma.collectionItem.findMany({where:{collectionId:{in:collections.map(item=>item.collectionId)},movieId:{not:null}},select:{movieId:true}});items.forEach(item=>{if(item.movieId)ids.add(item.movieId)})}return {movieIds:ids,collectionIds:new Set(collections.map(item=>item.collectionId))}}
-const canAccessMovie=async(userId:string,movieId:string)=>{const scope=await userAccessScope(userId);return !scope||scope.movieIds.has(movieId)}
-async function replaceUserAccess(userId:string,access:{movieIds:string[];collectionIds:string[]},defaultCollectionId?:string|null){const collectionIds=defaultCollectionId?[...new Set([...access.collectionIds,defaultCollectionId])]:access.collectionIds;await prisma.$transaction(async(tx)=>{await tx.userMovieAccess.deleteMany({where:{userId}});await tx.userCollectionAccess.deleteMany({where:{userId}});if(access.movieIds.length)await tx.userMovieAccess.createMany({data:[...new Set(access.movieIds)].map(movieId=>({userId,movieId})),skipDuplicates:true});if(collectionIds.length)await tx.userCollectionAccess.createMany({data:[...new Set(collectionIds)].map(collectionId=>({userId,collectionId})),skipDuplicates:true})})}
-const supportConversationFor=(userId:string)=>prisma.supportConversation.upsert({where:{userId},create:{userId},update:{}});
-async function runTrimEditorJob(job:EditorJob,inputPath:string,synopsis:string){try{rememberEditorJob(job,"Preparing editor workspace",2,"RUNNING");const outputKey=`edits/${job.id}.mp4`;const outputPath=path.join(storageRoot,outputKey);await mkdir(path.dirname(outputPath),{recursive:true});await trimVideo(inputPath,outputPath,job.startSeconds,job.endSeconds,progress=>rememberEditorJob(job,"Trimming video",progress,"RUNNING"));rememberEditorJob(job,"Saving edited draft",99,"RUNNING");const fileStat=await stat(outputPath);const durationSeconds=Math.round(await probeDurationSeconds(outputPath)??(job.endSeconds-job.startSeconds));const movie=await prisma.movie.create({data:{title:job.title,synopsis:`${synopsis}\n\nEdited clip: ${Math.round(job.startSeconds)}s to ${Math.round(job.endSeconds)}s.`,slug:`${slugify(job.title)}-${Date.now()}`,status:"DRAFT",assets:{create:{state:"READY",sourceStorageKey:outputKey,manifestStorageKey:outputKey,durationSeconds:durationSeconds||undefined,uploads:{create:{storageKey:outputKey,bytesExpected:fileStat.size,bytesReceived:fileStat.size,status:"COMPLETED"}}}}},include:{assets:true}});job.resultMovieId=movie.id;job.resultAssetId=movie.assets[0]?.id;rememberEditorJob(job,"Edited draft ready",100,"COMPLETED")}catch(error){job.error=error instanceof Error?error.message:"Editor job failed";rememberEditorJob(job,"Failed",100,"FAILED")}}
-
-app.get("/health",async()=>({status:"ok"}));
-app.get("/ready",async(_req,reply)=>{try{await prisma.$queryRaw`SELECT 1`;return {status:"ready"}}catch{return reply.code(503).send({status:"not-ready"})}});
-
-app.post("/api/v1/auth/register",{config:{rateLimit:{max:5,timeWindow:"15 minutes"}}},async(req,reply)=>{
-  if(!config.REGISTRATION_ENABLED)return sendError(reply,req.id,403,"REGISTRATION_DISABLED","Registration is currently unavailable");
-  const body=z.object({email:z.string().email(),password:z.string().min(12).max(128),displayName:z.string().min(2).max(80)}).parse(req.body);
-  const email=body.email.toLowerCase(); if(await prisma.user.findUnique({where:{email}}))return sendError(reply,req.id,409,"ACCOUNT_EXISTS","An account already exists");
-  const user=await prisma.user.create({data:{email,displayName:body.displayName,passwordHash:await argon2.hash(body.password,{type:argon2.argon2id}),role:"VIEWER"}});
-  const token=opaqueToken(); await prisma.emailVerificationToken.create({data:{userId:user.id,tokenHash:hashToken(token),expiresAt:new Date(Date.now()+24*60*60_000)}});
-  await prisma.securityEvent.create({data:{userId:user.id,kind:"ACCOUNT_REGISTERED",severity:"INFO"}});
-  return reply.code(201).send({user:publicUser(user),verificationToken:config.NODE_ENV==="development"?token:undefined});
+await app.register(multipart, {
+  limits: {
+    fileSize: Number(process.env.MAX_UPLOAD_BYTES ?? 10737418240),
+    files: Number(process.env.MAX_UPLOAD_FILES ?? 20),
+  },
 });
+await app.register(rateLimit, { max: 300, timeWindow: "1 minute" });
 
-app.post("/api/v1/auth/login",{config:{rateLimit:{max:8,timeWindow:"15 minutes"}}},async(req,reply)=>{
-  const body=z.object({email:z.string().email(),password:z.string(),deviceId:z.string().min(8)}).parse(req.body);
-  const user=await verifyPasswordAndTrack(prisma,body.email,body.password);
-  if(!user){const existing=await prisma.user.findUnique({where:{email:body.email.toLowerCase()},select:{id:true}});await prisma.securityEvent.create({data:{userId:existing?.id,kind:"LOGIN_FAILED",severity:"MEDIUM",metadata:{ipHash:ipHash(req)}}});return existing?sendError(reply,req.id,401,"INVALID_CREDENTIALS","Email or password is incorrect"):sendAccountStatus(reply,req.id,404,"ACCOUNT_NOT_FOUND","DELETED","This account no longer exists. Please contact the administrator.")}
-  if(user.deletedAt)return sendAccountStatus(reply,req.id,403,"ACCOUNT_INACTIVE","DELETED",user.deletedReason??"This account was deleted by the administrator.");
-  if(user.status!=="ACTIVE"){await prisma.securityEvent.create({data:{userId:user.id,kind:"LOGIN_BLOCKED",severity:"MEDIUM",metadata:{ipHash:ipHash(req),status:user.status}}});const message=user.status==="SUSPENDED"?"Your account is suspended. Please contact the administrator.":"Your account is disabled. Please contact the administrator.";return sendAccountStatus(reply,req.id,403,"ACCOUNT_INACTIVE",user.status,message)}
-  const maintenance=await maintenanceSettings();if(maintenance.enabled&&!isAdminRole(user.role))return sendAccountStatus(reply,req.id,503,"MAINTENANCE_MODE","MAINTENANCE",maintenance.message);
-  const tokens=await issueSession(prisma,user,sessionContext(req,body.deviceId));
-  await prisma.securityEvent.create({data:{userId:user.id,kind:"LOGIN_SUCCEEDED",severity:"INFO"}});
-  return {...tokens,user:publicUser(user)};
+type Auth = { sub: string; role: Role };
+type AuthRequest = FastifyRequest & { auth: Auth };
+const ipHash = (req: FastifyRequest) => createHash("sha256").update(req.ip).digest("hex");
+const sessionContext = (req: FastifyRequest, deviceId: string) => ({
+  deviceId,
+  userAgent: req.headers["user-agent"],
+  ipHash: ipHash(req),
 });
-
-app.post("/api/v1/auth/refresh",async(req,reply)=>{const body=z.object({refreshToken:z.string().min(32),deviceId:z.string().min(8)}).parse(req.body);const result=await rotateSession(prisma,body.refreshToken,sessionContext(req,body.deviceId));if(result.kind!=="ok")return sendError(reply,req.id,401,result.kind==="reuse"?"TOKEN_REUSE":"REFRESH_INVALID","Session is no longer valid");return result});
-app.post("/api/v1/auth/logout",async(req,reply)=>{const body=z.object({refreshToken:z.string().min(32)}).parse(req.body);await prisma.refreshSession.updateMany({where:{tokenHash:hashToken(body.refreshToken),revokedAt:null},data:{revokedAt:new Date()}});return reply.code(204).send()});
-
-app.post("/api/v1/auth/forgot-password",{config:{rateLimit:{max:3,timeWindow:"15 minutes"}}},async(req)=>{const body=z.object({email:z.string().email()}).parse(req.body);const user=await prisma.user.findUnique({where:{email:body.email.toLowerCase()}});let token:string|undefined;if(user&&user.status==="ACTIVE"){token=opaqueToken();await prisma.passwordResetToken.create({data:{userId:user.id,tokenHash:hashToken(token),expiresAt:new Date(Date.now()+config.EMAIL_TOKEN_TTL_MINUTES*60_000)}})}return {message:"If the account exists, reset instructions will be sent.",resetToken:config.NODE_ENV==="development"?token:undefined}});
-app.post("/api/v1/auth/reset-password",async(req,reply)=>{const body=z.object({token:z.string().min(32),password:z.string().min(12).max(128)}).parse(req.body);const record=await prisma.passwordResetToken.findUnique({where:{tokenHash:hashToken(body.token)}});if(!record||record.usedAt||record.expiresAt<=new Date())return sendError(reply,req.id,400,"RESET_INVALID","Reset token is invalid or expired");await prisma.$transaction([prisma.user.update({where:{id:record.userId},data:{passwordHash:await argon2.hash(body.password,{type:argon2.argon2id}),failedLoginCount:0,lockedUntil:null}}),prisma.passwordResetToken.update({where:{id:record.id},data:{usedAt:new Date()}}),prisma.refreshSession.updateMany({where:{userId:record.userId,revokedAt:null},data:{revokedAt:new Date()}})]);return {message:"Password updated"}});
-app.post("/api/v1/auth/verify-email",async(req,reply)=>{const body=z.object({token:z.string().min(32)}).parse(req.body);const record=await prisma.emailVerificationToken.findUnique({where:{tokenHash:hashToken(body.token)}});if(!record||record.usedAt||record.expiresAt<=new Date())return sendError(reply,req.id,400,"VERIFICATION_INVALID","Verification token is invalid or expired");await prisma.$transaction([prisma.user.update({where:{id:record.userId},data:{emailVerifiedAt:new Date()}}),prisma.emailVerificationToken.update({where:{id:record.id},data:{usedAt:new Date()}})]);return {message:"Email verified"}});
-
-app.get("/api/v1/account/me",{preHandler:authenticate},async(req)=>publicUser(await prisma.user.findUniqueOrThrow({where:{id:(req as AuthRequest).auth.sub}})));
-app.patch("/api/v1/account/me",{preHandler:authenticate},async(req)=>{const auth=(req as AuthRequest).auth;const body=z.object({displayName:z.string().min(2).max(80).optional(),password:z.string().min(12).max(128).optional()}).parse(req.body);const user=await prisma.user.update({where:{id:auth.sub},data:{displayName:body.displayName,passwordHash:body.password?await argon2.hash(body.password,{type:argon2.argon2id}):undefined}});return publicUser(user)});
-app.get("/api/v1/account/dashboard",{preHandler:authenticate},async(req)=>{const userId=(req as AuthRequest).auth.sub;const [user,unreadNotifications,conversation]=await Promise.all([prisma.user.findUniqueOrThrow({where:{id:userId}}),prisma.userNotification.count({where:{userId,readAt:null}}),supportConversationFor(userId)]);const unreadMessages=await prisma.supportMessage.count({where:{conversationId:conversation.id,senderUserId:{not:userId},readAt:null}});return {user:publicUser(user),unreadNotifications,unreadMessages}});
-app.get("/api/v1/account/sessions",{preHandler:authenticate},async(req)=>prisma.refreshSession.findMany({where:{userId:(req as AuthRequest).auth.sub,revokedAt:null,expiresAt:{gt:new Date()}},select:{id:true,deviceId:true,userAgent:true,createdAt:true,lastUsedAt:true,expiresAt:true},orderBy:{lastUsedAt:"desc"}}));
-app.delete("/api/v1/account/sessions/:id",{preHandler:authenticate},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;await prisma.refreshSession.updateMany({where:{id,userId:(req as AuthRequest).auth.sub},data:{revokedAt:new Date()}});return reply.code(204).send()});
-app.delete("/api/v1/account/sessions",{preHandler:authenticate},async(req,reply)=>{await prisma.refreshSession.updateMany({where:{userId:(req as AuthRequest).auth.sub,revokedAt:null},data:{revokedAt:new Date()}});return reply.code(204).send()});
-app.get("/api/v1/messages",{preHandler:authenticate},async(req)=>{const userId=(req as AuthRequest).auth.sub;const conversation=await supportConversationFor(userId);const messages=await prisma.supportMessage.findMany({where:{conversationId:conversation.id},include:{sender:{select:{id:true,displayName:true,role:true}}},orderBy:{createdAt:"asc"},take:100});await prisma.supportMessage.updateMany({where:{conversationId:conversation.id,senderUserId:{not:userId},readAt:null},data:{readAt:new Date()}});return {conversationId:conversation.id,messages,items:messages}});
-app.post("/api/v1/messages",{preHandler:authenticate,config:{rateLimit:{max:30,timeWindow:"1 minute"}}},async(req,reply)=>{const userId=(req as AuthRequest).auth.sub;const body=z.object({body:z.string().min(1).max(5000)}).parse(req.body);const conversation=await supportConversationFor(userId);const message=await prisma.supportMessage.create({data:{conversationId:conversation.id,senderUserId:userId,body:body.body.trim()},include:{sender:{select:{id:true,displayName:true,role:true}}}});await prisma.supportConversation.update({where:{id:conversation.id},data:{updatedAt:new Date()}});return reply.code(201).send(message)});
-app.get("/api/v1/notifications",{preHandler:authenticate},async(req)=>prisma.userNotification.findMany({where:{userId:(req as AuthRequest).auth.sub},orderBy:{createdAt:"desc"},take:100}));
-app.patch("/api/v1/notifications/:id/read",{preHandler:authenticate},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const updated=await prisma.userNotification.updateMany({where:{id,userId:(req as AuthRequest).auth.sub},data:{readAt:new Date()}});if(!updated.count)return sendError(reply,req.id,404,"NOTIFICATION_NOT_FOUND","Notification not found");return reply.code(204).send()});
-app.patch("/api/v1/notifications/read-all",{preHandler:authenticate},async(req,reply)=>{await prisma.userNotification.updateMany({where:{userId:(req as AuthRequest).auth.sub,readAt:null},data:{readAt:new Date()}});return reply.code(204).send()});
-
-app.post("/api/v1/admin/auth/login",{config:{rateLimit:{max:6,timeWindow:"15 minutes"}}},async(req,reply)=>{const body=z.object({email:z.string().email(),password:z.string(),deviceId:z.string().min(8)}).parse(req.body);const user=await verifyPasswordAndTrack(prisma,body.email,body.password);if(!user||user.status!=="ACTIVE"||!isAdminRole(user.role))return sendError(reply,req.id,401,"INVALID_CREDENTIALS","Email or password is incorrect");const accessToken=await signAccess(user.id,user.role);const csrf=opaqueToken();reply.setCookie(config.ADMIN_COOKIE_NAME,accessToken,{httpOnly:true,secure:config.NODE_ENV==="production",sameSite:adminCookieSameSite,path:"/",maxAge:config.ACCESS_TOKEN_TTL_SECONDS});reply.setCookie(config.ADMIN_CSRF_COOKIE_NAME,csrf,{httpOnly:false,secure:config.NODE_ENV==="production",sameSite:adminCookieSameSite,path:"/",maxAge:config.ACCESS_TOKEN_TTL_SECONDS});await prisma.adminAuditLog.create({data:{actorUserId:user.id,action:"ADMIN_LOGIN",targetType:"SESSION",requestId:req.id,ipHash:ipHash(req)}});return {accessToken,user:publicUser(user),csrfToken:csrf}});
-app.post("/api/v1/admin/auth/logout",{preHandler:[authenticate,requireCsrf]},async(req,reply)=>{reply.clearCookie(config.ADMIN_COOKIE_NAME,{path:"/"});reply.clearCookie(config.ADMIN_CSRF_COOKIE_NAME,{path:"/"});await audit(req as AuthRequest,"ADMIN_LOGOUT","SESSION");return reply.code(204).send()});
-app.get("/api/v1/admin/auth/me",{preHandler:authenticate},async(req,reply)=>{const auth=(req as AuthRequest).auth;if(!isAdminRole(auth.role))return sendError(reply,req.id,403,"FORBIDDEN","Administrator access required");const user=await prisma.user.findUniqueOrThrow({where:{id:auth.sub}});return {...publicUser(user),accessToken:await signAccess(user.id,user.role)}});
-app.get("/api/v1/admin/api-tokens",{preHandler:requirePermission("users:manage")},async(req)=>prisma.apiToken.findMany({where:{userId:(req as AuthRequest).auth.sub},select:{id:true,name:true,createdAt:true,lastUsedAt:true,revokedAt:true},orderBy:{createdAt:"desc"},take:50}));
-app.post("/api/v1/admin/api-tokens",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const body=z.object({name:z.string().min(2).max(80)}).parse(req.body);const token=`${apiTokenPrefix}${opaqueToken()}${opaqueToken()}`;const record=await prisma.apiToken.create({data:{userId:(req as AuthRequest).auth.sub,name:body.name.trim(),tokenHash:hashToken(token)}});await audit(req as AuthRequest,"API_TOKEN_CREATED","API_TOKEN",record.id,{name:record.name});return reply.code(201).send({id:record.id,name:record.name,createdAt:record.createdAt,token})});
-app.delete("/api/v1/admin/api-tokens/:id",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const updated=await prisma.apiToken.updateMany({where:{id,userId:(req as AuthRequest).auth.sub,revokedAt:null},data:{revokedAt:new Date()}});if(!updated.count)return sendError(reply,req.id,404,"API_TOKEN_NOT_FOUND","API token not found");await audit(req as AuthRequest,"API_TOKEN_REVOKED","API_TOKEN",id);return reply.code(204).send()});
-app.get("/api/v1/admin/users",{preHandler:requirePermission("users:manage")},async()=>prisma.user.findMany({where:{deletedAt:null},select:{id:true,email:true,displayName:true,role:true,status:true,accessRestricted:true,defaultCollectionId:true,emailVerifiedAt:true,createdAt:true,movieAccess:{select:{movieId:true}},collectionAccess:{select:{collectionId:true}}},orderBy:{createdAt:"desc"},take:100}));
-app.post("/api/v1/admin/users",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const body=userWriteBody.extend({email:z.string().email(),displayName:z.string().min(2).max(80),password:z.string().min(12).max(128)}).parse(req.body);const user=await prisma.user.create({data:{email:body.email.toLowerCase(),displayName:body.displayName,passwordHash:await argon2.hash(body.password,{type:argon2.argon2id}),role:body.role??"VIEWER",status:body.status??"ACTIVE",accessRestricted:body.accessRestricted??true,defaultCollectionId:body.defaultCollectionId||undefined,emailVerifiedAt:new Date()}});if(body.access)await replaceUserAccess(user.id,body.access,body.accessRestricted===false?null:body.defaultCollectionId);await audit(req as AuthRequest,"USER_CREATED","USER",user.id,{email:user.email,role:user.role,defaultCollectionId:body.defaultCollectionId});return reply.code(201).send(await prisma.user.findUniqueOrThrow({where:{id:user.id},select:{id:true,email:true,displayName:true,role:true,status:true,accessRestricted:true,defaultCollectionId:true,emailVerifiedAt:true,createdAt:true,movieAccess:{select:{movieId:true}},collectionAccess:{select:{collectionId:true}}}}))});
-app.patch("/api/v1/admin/users/:id",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=userWriteBody.parse(req.body);const data:Prisma.UserUncheckedUpdateInput={email:body.email?.toLowerCase(),displayName:body.displayName,role:body.role,status:body.status,accessRestricted:body.accessRestricted,defaultCollectionId:body.defaultCollectionId===undefined?undefined:body.defaultCollectionId||null,passwordHash:body.password?await argon2.hash(body.password,{type:argon2.argon2id}):undefined};const user=await prisma.user.update({where:{id},data});if(body.status&&body.status!=="ACTIVE")await prisma.refreshSession.updateMany({where:{userId:id,revokedAt:null},data:{revokedAt:new Date()}});if(body.access)await replaceUserAccess(id,body.access,body.accessRestricted===false?null:body.defaultCollectionId);await audit(req as AuthRequest,"USER_UPDATED","USER",id,{fields:Object.keys(body)});return prisma.user.findUniqueOrThrow({where:{id},select:{id:true,email:true,displayName:true,role:true,status:true,accessRestricted:true,defaultCollectionId:true,emailVerifiedAt:true,createdAt:true,movieAccess:{select:{movieId:true}},collectionAccess:{select:{collectionId:true}}}})});
-app.patch("/api/v1/admin/users/:id/status",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({status:z.enum(["ACTIVE","SUSPENDED","DISABLED"])}).parse(req.body);const user=await prisma.user.update({where:{id},data:{status:body.status}});if(body.status!=="ACTIVE")await prisma.refreshSession.updateMany({where:{userId:id,revokedAt:null},data:{revokedAt:new Date()}});await audit(req as AuthRequest,"USER_STATUS_CHANGED","USER",id,{status:body.status});return publicUser(user)});
-app.delete("/api/v1/admin/users/:id",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const auth=(req as AuthRequest).auth;if(id===auth.sub)return sendError(reply,req.id,400,"USER_DELETE_SELF","You cannot delete your own admin account");const user=await prisma.user.findUnique({where:{id}});if(!user||user.deletedAt)return sendError(reply,req.id,404,"USER_NOT_FOUND","User not found");await prisma.$transaction(async(tx)=>{await tx.refreshSession.updateMany({where:{userId:id,revokedAt:null},data:{revokedAt:new Date()}});await tx.playbackSession.updateMany({where:{userId:id,revokedAt:null},data:{revokedAt:new Date()}});await tx.user.update({where:{id},data:{status:"DISABLED",deletedAt:new Date(),deletedReason:"Deleted by administrator"}})});await audit(req as AuthRequest,"USER_SOFT_DELETED","USER",id,{email:user.email});return reply.code(204).send()});
-app.get("/api/v1/admin/conversations",{preHandler:requirePermission("users:manage")},async(req)=>{
-  const auth=(req as AuthRequest).auth;
-  const conversations=await prisma.supportConversation.findMany({
-    orderBy:{updatedAt:"desc"},
-    take:100,
-    include:{
-      user:{select:{id:true,email:true,displayName:true,status:true}},
-      messages:{orderBy:{createdAt:"asc"},take:50,include:{sender:{select:{id:true,displayName:true,role:true}}}}
-    }
+const sendError = (reply: FastifyReply, requestId: string, status: number, code: string, message: string) =>
+  reply.code(status).send({ error: { code, message, requestId } });
+const sendAccountStatus = (
+  reply: FastifyReply,
+  requestId: string,
+  status: number,
+  code: string,
+  accountStatus: string,
+  adminMessage: string,
+) =>
+  reply.code(status).send({
+    error: { code, message: adminMessage, requestId, accountStatus, adminMessage },
+    accountStatus,
+    adminMessage,
   });
-  return Promise.all(conversations.map(async(conversation)=>({...conversation,lastMessage:conversation.messages.at(-1)??null,unreadCount:await prisma.supportMessage.count({where:{conversationId:conversation.id,senderUserId:{not:auth.sub},readAt:null}})})))
-});
-app.post("/api/v1/admin/conversations",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const auth=(req as AuthRequest).auth;const body=z.object({userId:z.string().uuid(),body:z.string().min(1).max(5000)}).parse(req.body);const user=await prisma.user.findUnique({where:{id:body.userId}});if(!user)return sendError(reply,req.id,404,"USER_NOT_FOUND","User not found");const conversation=await supportConversationFor(user.id);const message=await prisma.supportMessage.create({data:{conversationId:conversation.id,senderUserId:auth.sub,body:body.body.trim()},include:{sender:{select:{id:true,displayName:true,role:true}}}});await prisma.supportConversation.update({where:{id:conversation.id},data:{updatedAt:new Date()}});await audit(req as AuthRequest,"SUPPORT_CONVERSATION_STARTED","CONVERSATION",conversation.id,{userId:user.id});return reply.code(201).send({conversation,message})});
-app.patch("/api/v1/admin/conversations/read-all",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const auth=(req as AuthRequest).auth;await prisma.supportMessage.updateMany({where:{senderUserId:{not:auth.sub},readAt:null},data:{readAt:new Date()}});return reply.code(204).send()});
-app.get("/api/v1/admin/conversations/:id/messages",{preHandler:requirePermission("users:manage")},async(req,reply)=>{const auth=(req as AuthRequest).auth;const id=z.object({id:z.string().uuid()}).parse(req.params).id;const conversation=await prisma.supportConversation.findUnique({where:{id},include:{user:{select:{id:true,email:true,displayName:true,status:true}}}});if(!conversation)return sendError(reply,req.id,404,"CONVERSATION_NOT_FOUND","Conversation not found");await prisma.supportMessage.updateMany({where:{conversationId:id,senderUserId:{not:auth.sub},readAt:null},data:{readAt:new Date()}});return {...conversation,messages:await prisma.supportMessage.findMany({where:{conversationId:id},include:{sender:{select:{id:true,displayName:true,role:true}}},orderBy:{createdAt:"asc"},take:200})}});
-app.post("/api/v1/admin/conversations/:id/messages",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const auth=(req as AuthRequest).auth;const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({body:z.string().min(1).max(5000)}).parse(req.body);const conversation=await prisma.supportConversation.findUnique({where:{id}});if(!conversation)return sendError(reply,req.id,404,"CONVERSATION_NOT_FOUND","Conversation not found");await prisma.supportMessage.updateMany({where:{conversationId:id,senderUserId:{not:auth.sub},readAt:null},data:{readAt:new Date()}});const message=await prisma.supportMessage.create({data:{conversationId:id,senderUserId:auth.sub,body:body.body.trim()},include:{sender:{select:{id:true,displayName:true,role:true}}}});await prisma.supportConversation.update({where:{id},data:{updatedAt:new Date()}});await audit(req as AuthRequest,"SUPPORT_MESSAGE_SENT","CONVERSATION",id,{userId:conversation.userId});return reply.code(201).send(message)});
-app.get("/api/v1/admin/notifications",{preHandler:requirePermission("users:manage")},async()=>prisma.userNotification.findMany({orderBy:{createdAt:"desc"},take:100,include:{user:{select:{id:true,email:true,displayName:true}}}}));
-app.post("/api/v1/admin/notifications",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const body=z.object({title:z.string().min(1).max(120),body:z.string().min(1).max(2000),allUsers:z.boolean().default(false),userIds:z.array(z.string().uuid()).default([])}).parse(req.body);const selectedIds=[...new Set(body.userIds)];const users=selectedIds.length?await prisma.user.findMany({where:{id:{in:selectedIds},role:"VIEWER",status:"ACTIVE"},select:{id:true}}):body.allUsers?await prisma.user.findMany({where:{role:"VIEWER",status:"ACTIVE"},select:{id:true}}):[];if(!users.length)return sendError(reply,req.id,400,"NOTIFICATION_RECIPIENTS_REQUIRED","Choose at least one active viewer or send to all users");await prisma.userNotification.createMany({data:users.map(user=>({userId:user.id,title:body.title.trim(),body:body.body.trim()}))});await audit(req as AuthRequest,"NOTIFICATION_SENT","NOTIFICATION",undefined,{allUsers:!selectedIds.length&&body.allUsers,count:users.length,title:body.title});return reply.code(201).send({sent:users.length})});
-app.get("/api/v1/admin/audit-logs",{preHandler:requirePermission("audit:read")},async()=>prisma.adminAuditLog.findMany({orderBy:{createdAt:"desc"},take:100}));
-app.get("/api/v1/admin/security-events",{preHandler:requirePermission("settings:security")},async()=>prisma.securityEvent.findMany({orderBy:{createdAt:"desc"},take:100}));
-app.get("/api/v1/admin/playback-sessions",{preHandler:requirePermission("audit:read")},async()=>prisma.playbackSession.findMany({orderBy:{createdAt:"desc"},take:100,include:{user:{select:{email:true,displayName:true}},videoAsset:{include:{movie:true,episode:true}}}}));
-const settingsSnapshot=async()=>({registrationEnabled:config.REGISTRATION_ENABLED,maxConcurrentStreams:config.MAX_CONCURRENT_STREAMS,drmProvider:config.DRM_PROVIDER,widevineConfigured:Boolean(config.WIDEVINE_LICENSE_URL&&config.WIDEVINE_PROVIDER_API_KEY),storageRoot,deleteOriginalAfterPreview:await getBooleanSetting(deleteOriginalAfterPreviewKey,false),ffmpegPreset:process.env.FFMPEG_PRESET??"veryfast",ffmpegCrf:process.env.FFMPEG_CRF??null,maintenance:await maintenanceSettings(),backupSchedule:await backupScheduleSettings(),alertsConfigured:alertTargetsConfigured(),storageWarningPercent:await getSetting("storageWarningPercent",80),android:await androidUpdateSettings()});
-app.get("/api/v1/app/config",async()=>({maintenance:await maintenanceSettings(),android:await androidUpdateSettings()}));
-app.get("/api/v1/admin/settings",{preHandler:requirePermission("settings:security")},settingsSnapshot);
-app.patch("/api/v1/admin/settings",{preHandler:[requirePermission("settings:security"),requireCsrf]},async(req)=>{const body=z.object({deleteOriginalAfterPreview:z.boolean().optional(),maintenanceMode:z.boolean().optional(),maintenanceMessage:z.string().max(300).optional(),backupScheduleEnabled:z.boolean().optional(),backupScheduleHour:z.number().int().min(0).max(23).optional(),backupRetentionCount:z.number().int().min(1).max(60).optional(),backupScheduleDrive:z.boolean().optional(),storageWarningPercent:z.number().int().min(1).max(99).optional(),androidLatestVersionName:z.string().max(40).optional(),androidLatestVersionCode:z.number().int().min(1).optional(),androidUpdateRequired:z.boolean().optional(),androidUpdateMessage:z.string().max(300).optional(),androidDownloadUrl:z.string().url().nullable().optional()}).parse(req.body);if(body.deleteOriginalAfterPreview!==undefined)await setBooleanSetting(deleteOriginalAfterPreviewKey,body.deleteOriginalAfterPreview);if(body.maintenanceMode!==undefined)await setBooleanSetting("maintenanceMode",body.maintenanceMode);if(body.maintenanceMessage!==undefined)await setSetting("maintenanceMessage",body.maintenanceMessage);if(body.backupScheduleEnabled!==undefined)await setBooleanSetting("backupScheduleEnabled",body.backupScheduleEnabled);if(body.backupScheduleHour!==undefined)await setSetting("backupScheduleHour",body.backupScheduleHour);if(body.backupRetentionCount!==undefined)await setSetting("backupRetentionCount",body.backupRetentionCount);if(body.backupScheduleDrive!==undefined)await setBooleanSetting("backupScheduleDrive",body.backupScheduleDrive);if(body.storageWarningPercent!==undefined)await setSetting("storageWarningPercent",body.storageWarningPercent);if(body.androidLatestVersionName!==undefined)await setSetting("androidLatestVersionName",body.androidLatestVersionName);if(body.androidLatestVersionCode!==undefined)await setSetting("androidLatestVersionCode",body.androidLatestVersionCode);if(body.androidUpdateRequired!==undefined)await setBooleanSetting("androidUpdateRequired",body.androidUpdateRequired);if(body.androidUpdateMessage!==undefined)await setSetting("androidUpdateMessage",body.androidUpdateMessage);if(body.androidDownloadUrl!==undefined)await setSetting("androidDownloadUrl",body.androidDownloadUrl??"");await audit(req as AuthRequest,"SETTINGS_UPDATED","SETTINGS",undefined,{fields:Object.keys(body)});return settingsSnapshot()});
-app.post("/api/v1/admin/alerts/test",{preHandler:[requirePermission("settings:security"),requireCsrf]},async(req)=>{await sendPlatformAlert("SecureStream test alert","Alerts are connected and working.",{requestId:req.id});await audit(req as AuthRequest,"ALERT_TEST_SENT","SETTINGS");return {sent:alertTargetsConfigured()}});
-app.get("/api/v1/admin/backups",{preHandler:requirePermission("settings:security")},async()=>({storageRoot,googleDriveConfigured:Boolean(driveConfig()),items:await listBackups()}));
-app.post("/api/v1/admin/backups",{preHandler:[requirePermission("settings:security"),requireCsrf],config:{rateLimit:{max:3,timeWindow:"1 hour"}}},async(req,reply)=>{const backup=await createPortableBackup();await audit(req as AuthRequest,"BACKUP_CREATED","BACKUP",backup.name,{sizeBytes:backup.sizeBytes,mediaFiles:backup.mediaFiles});await sendPlatformAlert("SecureStream backup created",`${backup.name} is ready.`,{sizeBytes:backup.sizeBytes,mediaFiles:backup.mediaFiles});return reply.code(201).send(backup)});
-app.get("/api/v1/admin/backups/:name/download",{preHandler:requirePermission("settings:security")},async(req,reply)=>{const name=safeBackupName(z.object({name:z.string()}).parse(req.params).name);if(!name)return sendError(reply,req.id,400,"BACKUP_NAME_INVALID","Backup file name is invalid");const filePath=path.join(storageRoot,"backups",name);let size=0;try{size=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"BACKUP_NOT_FOUND","Backup file not found")};reply.header("content-type","application/x-tar").header("content-length",String(size)).header("content-disposition",`attachment; filename="${name}"`);return reply.send(createReadStream(filePath))});
-app.delete("/api/v1/admin/backups/:name",{preHandler:[requirePermission("settings:security"),requireCsrf]},async(req,reply)=>{const name=safeBackupName(z.object({name:z.string()}).parse(req.params).name);if(!name)return sendError(reply,req.id,400,"BACKUP_NAME_INVALID","Backup file name is invalid");await rm(path.join(storageRoot,"backups",name),{force:true});await audit(req as AuthRequest,"BACKUP_DELETED","BACKUP",name);await sendPlatformAlert("SecureStream backup deleted",name);return reply.code(204).send()});
-app.post("/api/v1/admin/backups/:name/google-drive",{preHandler:[requirePermission("settings:security"),requireCsrf],config:{rateLimit:{max:3,timeWindow:"1 hour"}}},async(req,reply)=>{const name=safeBackupName(z.object({name:z.string()}).parse(req.params).name);if(!name)return sendError(reply,req.id,400,"BACKUP_NAME_INVALID","Backup file name is invalid");try{const driveFile=await uploadBackupToDrive(name);await audit(req as AuthRequest,"BACKUP_UPLOADED_GOOGLE_DRIVE","BACKUP",name,{driveFileId:String(driveFile.id??"")});return driveFile}catch(error){return sendError(reply,req.id,400,"GOOGLE_DRIVE_UPLOAD_FAILED",error instanceof Error?error.message:"Google Drive upload failed")}});
-app.post("/api/v1/admin/backups/restore",{preHandler:[requirePermission("settings:security"),requireCsrf],config:{rateLimit:{max:2,timeWindow:"1 hour"}}},async(req,reply)=>{const part=await req.file();if(!part)return sendError(reply,req.id,400,"BACKUP_FILE_REQUIRED","Choose a SecureStream backup .tar file");const backupsDir=path.join(storageRoot,"backups");await mkdir(backupsDir,{recursive:true});const restorePath=path.join(backupsDir,`restore-${randomUUID()}.tar`);try{await pipeline(part.file,createWriteStream(restorePath));const result=await restorePortableBackup(restorePath);await audit(req as AuthRequest,"BACKUP_RESTORED","BACKUP",part.filename,{mediaFiles:result.mediaFiles});await sendPlatformAlert("SecureStream backup restored",part.filename??"Backup restored",{mediaFiles:result.mediaFiles});return result}finally{await rm(restorePath,{force:true}).catch(()=>undefined)}});
-app.post("/api/v1/admin/backups/run-scheduled-now",{preHandler:[requirePermission("settings:security"),requireCsrf],config:{rateLimit:{max:2,timeWindow:"1 hour"}}},async(req,reply)=>{const backup=await createPortableBackup();const settings=await backupScheduleSettings();await pruneBackups(settings.retentionCount);await audit(req as AuthRequest,"BACKUP_SCHEDULE_MANUAL_RUN","BACKUP",backup.name,{sizeBytes:backup.sizeBytes});await sendPlatformAlert("SecureStream scheduled backup manually created",`${backup.name} is ready.`);return reply.code(201).send(backup)});
-app.get("/api/v1/admin/system-status",{preHandler:requirePermission("audit:read")},async()=>{const memoryTotal=os.totalmem();const memoryFree=os.freemem();const cpus=os.cpus();const loadAverage=os.loadavg();const cpuCores=cpus.length||1;const cpuUsedPercent=Math.max(0,Math.min(100,Math.round(((loadAverage[0]??0)/cpuCores)*100)));const storage=await statfs(storageRoot).catch(()=>undefined);const storageTotal=storage?storage.blocks*storage.bsize:0;const storageFree=storage?storage.bavail*storage.bsize:0;const network=Object.entries(os.networkInterfaces()).flatMap(([name,addresses])=>(addresses??[]).filter(address=>!address.internal).map(address=>({name,family:address.family,address:address.address,mac:address.mac})));return {checkedAt:new Date().toISOString(),host:{hostname:os.hostname(),platform:os.platform(),arch:os.arch(),uptimeSeconds:Math.round(os.uptime()),processUptimeSeconds:Math.round(process.uptime())},cpu:{cores:cpuCores,loadAverage,usedPercent:cpuUsedPercent},memory:{totalBytes:memoryTotal,freeBytes:memoryFree,usedBytes:memoryTotal-memoryFree,usedPercent:memoryTotal?Math.round(((memoryTotal-memoryFree)/memoryTotal)*100):0},storage:{path:storageRoot,totalBytes:storageTotal,freeBytes:storageFree,usedBytes:Math.max(0,storageTotal-storageFree),usedPercent:storageTotal?Math.round(((storageTotal-storageFree)/storageTotal)*100):0},network:{interfaceCount:network.length,interfaces:network}}});
-app.get("/api/v1/admin/activity",{preHandler:requirePermission("audit:read")},async()=>{const rows=await prisma.adminAuditLog.findMany({orderBy:{createdAt:"desc"},take:100});const users=await prisma.user.findMany({where:{id:{in:[...new Set(rows.map(row=>row.actorUserId))]}},select:{id:true,email:true,displayName:true,role:true}});const byId=new Map(users.map(user=>[user.id,user]));return rows.map(row=>({id:row.id,action:row.action,targetType:row.targetType,targetId:row.targetId,actor:byId.get(row.actorUserId)??null,metadata:row.metadata,createdAt:row.createdAt,requestId:row.requestId}))});
-app.get("/api/v1/admin/device-sessions",{preHandler:requirePermission("users:manage")},async()=>prisma.refreshSession.findMany({where:{revokedAt:null,expiresAt:{gt:new Date()},user:{deletedAt:null}},orderBy:{lastUsedAt:"desc"},take:200,include:{user:{select:{id:true,email:true,displayName:true,role:true,status:true}}}}));
-app.delete("/api/v1/admin/device-sessions/:id",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;await prisma.refreshSession.updateMany({where:{id},data:{revokedAt:new Date()}});await audit(req as AuthRequest,"DEVICE_SESSION_REVOKED","SESSION",id);return reply.code(204).send()});
-app.delete("/api/v1/admin/users/:id/sessions",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;await prisma.refreshSession.updateMany({where:{userId:id,revokedAt:null},data:{revokedAt:new Date()}});await audit(req as AuthRequest,"USER_SESSIONS_REVOKED","USER",id);return reply.code(204).send()});
-app.get("/api/v1/admin/storage-breakdown",{preHandler:requirePermission("audit:read")},storageBreakdownReport);
-app.get("/api/v1/admin/storage-cleanup",{preHandler:requirePermission("audit:read")},async()=>storageCleanupReport(false));
-app.post("/api/v1/admin/storage-cleanup",{preHandler:[requirePermission("settings:security"),requireCsrf]},async(req)=>{const report=await storageCleanupReport(true);await audit(req as AuthRequest,"STORAGE_CLEANUP","STORAGE",undefined,{deletedFiles:report.deletedFiles,deletedBytes:report.deletedBytes,failed:report.failed.length});return report});
-app.get("/api/v1/admin/files",{preHandler:requirePermission("catalog:write")},async()=>{const assets=await prisma.videoAsset.findMany({orderBy:{updatedAt:"desc"},take:250,include:{movie:{select:{id:true,title:true,status:true}},episode:{select:{id:true,title:true,status:true}},uploads:{orderBy:{createdAt:"desc"},take:1,select:{id:true,storageKey:true,bytesExpected:true,bytesReceived:true,status:true,createdAt:true,updatedAt:true}}}});return assets.map(asset=>{const upload=asset.uploads[0];const sourceKey=asset.sourceStorageKey;const previewKey=asset.manifestStorageKey;return {id:asset.id,title:asset.movie?.title??asset.episode?.title??"Unattached asset",ownerType:asset.movie?"Video":asset.episode?"Episode":"Asset",ownerStatus:asset.movie?.status??asset.episode?.status??null,movieId:asset.movieId,episodeId:asset.episodeId,state:asset.state,durationSeconds:asset.durationSeconds,sourceStorageKey:sourceKey,previewStorageKey:previewKey,sourceFileName:path.basename(sourceKey),previewFileName:previewKey?path.basename(previewKey):null,format:(path.extname(sourceKey).replace(".","")||"unknown").toUpperCase(),previewFormat:previewKey?(path.extname(previewKey).replace(".","")||"unknown").toUpperCase():null,sizeBytes:Number(upload?.bytesReceived??upload?.bytesExpected??0),expectedBytes:Number(upload?.bytesExpected??0),uploadStatus:upload?.status??null,createdAt:asset.createdAt,updatedAt:asset.updatedAt,uploadedAt:upload?.updatedAt??upload?.createdAt??null}})});
-app.get("/api/v1/admin/editor/jobs",{preHandler:requirePermission("catalog:write")},async()=>[...editorJobs.values()].sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,50));
-app.get("/api/v1/admin/editor/jobs/:id",{preHandler:requirePermission("catalog:write")},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const job=editorJobs.get(id);if(!job)return sendError(reply,req.id,404,"EDITOR_JOB_NOT_FOUND","Editor job not found");return job});
-app.post("/api/v1/admin/editor/jobs/trim",{preHandler:[requirePermission("catalog:write"),requireCsrf],config:{rateLimit:{max:6,timeWindow:"15 minutes"}}},async(req,reply)=>{const body=z.object({assetId:z.string().uuid(),startSeconds:z.number().min(0),endSeconds:z.number().positive(),title:z.string().min(1).max(160).optional()}).refine(value=>value.endSeconds>value.startSeconds,{message:"End time must be after start time"}).parse(req.body);const asset=await prisma.videoAsset.findUnique({where:{id:body.assetId},include:{movie:true,episode:true}});if(!asset)return sendError(reply,req.id,404,"ASSET_NOT_FOUND","Video asset not found");const sourceKey=asset.sourceStorageKey||asset.manifestStorageKey;if(!sourceKey)return sendError(reply,req.id,404,"SOURCE_NOT_FOUND","Source file is unavailable");const inputPath=storagePathFor(sourceKey);if(!inputPath)return sendError(reply,req.id,400,"SOURCE_INVALID","Source path is invalid");try{await stat(inputPath)}catch{return sendError(reply,req.id,404,"SOURCE_NOT_FOUND","Source file is unavailable on disk")};const sourceTitle=asset.movie?.title??asset.episode?.title??"Video";const job:EditorJob={id:randomUUID(),assetId:asset.id,title:body.title?.trim()||`${sourceTitle} (edited)`,sourceTitle,startSeconds:body.startSeconds,endSeconds:body.endSeconds,status:"QUEUED",progress:0,phase:"Queued",createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};editorJobs.set(job.id,job);await audit(req as AuthRequest,"EDITOR_TRIM_QUEUED","VIDEO_ASSET",asset.id,{jobId:job.id,startSeconds:body.startSeconds,endSeconds:body.endSeconds});void runTrimEditorJob(job,inputPath,asset.movie?.synopsis??asset.episode?.synopsis??"Edited in SecureStream admin.");return reply.code(202).send(job)});
-
-app.get("/api/v1/admin/movies",{preHandler:requirePermission("catalog:write")},async()=>prisma.movie.findMany({where:{deletedAt:null},orderBy:{updatedAt:"desc"},include:{assets:true},take:100}));
-app.post("/api/v1/admin/movies",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const body=catalogBody.parse(req.body);const movie=await prisma.movie.create({data:{...body,slug:body.slug??slugify(body.title)}});await audit(req as AuthRequest,"MOVIE_CREATED","MOVIE",movie.id,{title:movie.title});return reply.code(201).send(movie)});
-app.patch("/api/v1/admin/movies/:id",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=catalogBody.partial().parse(req.body);const movie=await prisma.movie.update({where:{id},data:{...body,slug:body.slug??(body.title?slugify(body.title):undefined),version:{increment:1}}});await audit(req as AuthRequest,"MOVIE_UPDATED","MOVIE",id,{fields:Object.keys(body)});return movie});
-app.post("/api/v1/admin/movies/:id/publish",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const movie=await prisma.movie.findUnique({where:{id},include:{assets:true}});if(!movie)return sendError(reply,req.id,404,"MOVIE_NOT_FOUND","Movie not found");if(!movieHasReadyAsset(movie))return sendError(reply,req.id,409,"PUBLISH_BLOCKED","A ready video asset is required before publishing");const updated=await prisma.movie.update({where:{id},data:{status:"PUBLISHED",version:{increment:1}}});await audit(req as AuthRequest,"MOVIE_PUBLISHED","MOVIE",id);return updated});
-app.delete("/api/v1/admin/movies/:id",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const movie=await prisma.movie.findUnique({where:{id},include:{assets:true}});if(!movie||movie.deletedAt)return sendError(reply,req.id,404,"MOVIE_NOT_FOUND","Movie not found");const assetIds=movie.assets.map(asset=>asset.id);await prisma.$transaction(async(tx)=>{await tx.playbackSession.updateMany({where:{videoAssetId:{in:assetIds},revokedAt:null},data:{revokedAt:new Date()}});await tx.movie.update({where:{id},data:{status:"ARCHIVED",deletedAt:new Date(),deletedReason:"Deleted by administrator",version:{increment:1}}})});await audit(req as AuthRequest,"MOVIE_SOFT_DELETED","MOVIE",id,{title:movie.title,assetCount:assetIds.length});return reply.code(204).send()});
-app.get("/api/v1/admin/trash",{preHandler:requirePermission("users:manage")},async()=>({users:await prisma.user.findMany({where:{deletedAt:{not:null}},select:{id:true,email:true,displayName:true,role:true,status:true,deletedAt:true,deletedReason:true,createdAt:true},orderBy:{deletedAt:"desc"},take:100}),movies:await prisma.movie.findMany({where:{deletedAt:{not:null}},select:{id:true,title:true,status:true,deletedAt:true,deletedReason:true,createdAt:true,assets:{select:{id:true,sourceStorageKey:true,manifestStorageKey:true}}},orderBy:{deletedAt:"desc"},take:100})}));
-app.post("/api/v1/admin/trash/users/:id/restore",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const user=await prisma.user.update({where:{id},data:{deletedAt:null,deletedReason:null,status:"ACTIVE"}});await audit(req as AuthRequest,"USER_RESTORED","USER",id,{email:user.email});return publicUser(user)});
-app.delete("/api/v1/admin/trash/users/:id/permanent",{preHandler:[requirePermission("users:manage"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const auth=(req as AuthRequest).auth;if(id===auth.sub)return sendError(reply,req.id,400,"USER_DELETE_SELF","You cannot delete your own admin account");const user=await prisma.user.findUnique({where:{id}});if(!user)return sendError(reply,req.id,404,"USER_NOT_FOUND","User not found");await prisma.$transaction(async(tx)=>{await tx.refreshSession.deleteMany({where:{userId:id}});await tx.passwordResetToken.deleteMany({where:{userId:id}});await tx.emailVerificationToken.deleteMany({where:{userId:id}});await tx.playbackSession.deleteMany({where:{userId:id}});await tx.watchProgress.deleteMany({where:{userId:id}});await tx.watchHistory.deleteMany({where:{userId:id}});await tx.myListItem.deleteMany({where:{userId:id}});await tx.userMovieAccess.deleteMany({where:{userId:id}});await tx.userCollectionAccess.deleteMany({where:{userId:id}});await tx.user.delete({where:{id}})});await audit(req as AuthRequest,"USER_PERMANENTLY_DELETED","USER",id,{email:user.email});return reply.code(204).send()});
-app.post("/api/v1/admin/trash/movies/:id/restore",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const movie=await prisma.movie.update({where:{id},data:{deletedAt:null,deletedReason:null,status:"DRAFT",version:{increment:1}}});await audit(req as AuthRequest,"MOVIE_RESTORED","MOVIE",id,{title:movie.title});return movie});
-app.delete("/api/v1/admin/trash/movies/:id/permanent",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const movie=await prisma.movie.findUnique({where:{id},include:{assets:true}});if(!movie)return sendError(reply,req.id,404,"MOVIE_NOT_FOUND","Movie not found");const assetIds=movie.assets.map(asset=>asset.id);await prisma.$transaction(async(tx)=>{await tx.collectionItem.deleteMany({where:{movieId:id}});await tx.myListItem.deleteMany({where:{catalogId:id}});if(assetIds.length){await tx.playbackSession.deleteMany({where:{videoAssetId:{in:assetIds}}});await tx.watchProgress.deleteMany({where:{videoAssetId:{in:assetIds}}});await tx.watchHistory.deleteMany({where:{videoAssetId:{in:assetIds}}});await tx.upload.deleteMany({where:{videoAssetId:{in:assetIds}}});await tx.videoRendition.deleteMany({where:{videoAssetId:{in:assetIds}}});await tx.videoAsset.deleteMany({where:{id:{in:assetIds}}})}await tx.movie.delete({where:{id}})});const imageKeys=[storageKeyFromMediaImageUrl(movie.posterUrl),storageKeyFromMediaImageUrl(movie.backdropUrl)].filter(Boolean) as string[];for(const key of new Set([...movie.assets.flatMap(asset=>[asset.sourceStorageKey,asset.manifestStorageKey].filter(Boolean) as string[]),...imageKeys])){const filePath=storagePathFor(key);if(filePath)await unlink(filePath).catch(()=>undefined)}await audit(req as AuthRequest,"MOVIE_PERMANENTLY_DELETED","MOVIE",id,{title:movie.title,assetCount:assetIds.length});return reply.code(204).send()});
-app.post("/api/v1/admin/series",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const body=seriesBody.parse(req.body);const series=await prisma.series.create({data:{...body,slug:body.slug??slugify(body.title)}});await audit(req as AuthRequest,"SERIES_CREATED","SERIES",series.id,{title:series.title});return reply.code(201).send(series)});
-app.get("/api/v1/admin/series",{preHandler:requirePermission("catalog:write")},async()=>prisma.series.findMany({orderBy:{updatedAt:"desc"},include:{seasons:{include:{episodes:true},orderBy:{number:"asc"}}},take:100}));
-app.post("/api/v1/admin/series/:id/seasons",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const seriesId=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({number:z.number().int().min(1),title:z.string().max(120).optional()}).parse(req.body);const season=await prisma.season.create({data:{seriesId,...body}});await audit(req as AuthRequest,"SEASON_CREATED","SEASON",season.id,{seriesId});return reply.code(201).send(season)});
-app.post("/api/v1/admin/seasons/:id/episodes",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const seasonId=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({number:z.number().int().min(1),title:z.string().min(1).max(160),synopsis:z.string().min(1).max(3000),status:z.enum(["DRAFT","PUBLISHED","UNPUBLISHED","ARCHIVED"]).default("DRAFT")}).parse(req.body);const episode=await prisma.episode.create({data:{seasonId,...body}});await audit(req as AuthRequest,"EPISODE_CREATED","EPISODE",episode.id,{seasonId});return reply.code(201).send(episode)});
-app.get("/api/v1/admin/collections",{preHandler:requirePermission("catalog:write")},async()=>prisma.collection.findMany({orderBy:[{parentId:"asc"},{sortOrder:"asc"}],include:{parent:true,children:{orderBy:{sortOrder:"asc"}},items:{orderBy:{sortOrder:"asc"},include:{movie:true,series:true}}}}));
-app.post("/api/v1/admin/collections",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const body=z.object({name:z.string().min(1).max(120),slug:z.string().min(1).max(100).optional(),published:z.boolean().default(false),sortOrder:z.number().int().default(0),parentId:z.string().uuid().nullable().optional(),items:z.array(z.object({movieId:z.string().uuid().optional(),seriesId:z.string().uuid().optional(),sortOrder:z.number().int().default(0)})).default([])}).parse(req.body);const collection=await prisma.collection.create({data:{name:body.name,slug:body.slug??slugify(body.name),published:body.published,sortOrder:body.sortOrder,parentId:body.parentId||undefined,items:{create:body.items}}});await audit(req as AuthRequest,"COLLECTION_CREATED","COLLECTION",collection.id);return reply.code(201).send(collection)});
-app.patch("/api/v1/admin/collections/:id",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({name:z.string().min(1).max(120).optional(),slug:z.string().min(1).max(100).optional(),published:z.boolean().optional(),sortOrder:z.number().int().optional(),parentId:z.string().uuid().nullable().optional(),items:z.array(z.object({movieId:z.string().uuid().optional(),seriesId:z.string().uuid().optional(),sortOrder:z.number().int().default(0)})).optional()}).parse(req.body);if(body.parentId===id)return sendError(reply,req.id,400,"COLLECTION_PARENT_INVALID","A folder cannot be its own parent");const collection=await prisma.$transaction(async(tx)=>{if(body.items){await tx.collectionItem.deleteMany({where:{collectionId:id}});await tx.collectionItem.createMany({data:body.items.map(item=>({collectionId:id,...item}))})}return tx.collection.update({where:{id},data:{name:body.name,slug:body.slug??(body.name?slugify(body.name):undefined),published:body.published,sortOrder:body.sortOrder,parentId:body.parentId}})});await audit(req as AuthRequest,"COLLECTION_UPDATED","COLLECTION",id);return collection});
-app.delete("/api/v1/admin/collections/:id",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const collection=await prisma.collection.findUnique({where:{id}});if(!collection)return sendError(reply,req.id,404,"COLLECTION_NOT_FOUND","Folder not found");await prisma.collection.delete({where:{id}});await audit(req as AuthRequest,"COLLECTION_DELETED","COLLECTION",id,{name:collection.name});return reply.code(204).send()});
-app.post("/api/v1/admin/video-assets",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const body=z.object({movieId:z.string().uuid().optional(),episodeId:z.string().uuid().optional(),sourceStorageKey:z.string().min(1),bytesExpected:z.number().int().positive()}).refine(v=>Boolean(v.movieId)!==Boolean(v.episodeId),"Attach an asset to exactly one movie or episode").parse(req.body);const asset=await prisma.videoAsset.create({data:{movieId:body.movieId,episodeId:body.episodeId,sourceStorageKey:body.sourceStorageKey,state:"UPLOADING",uploads:{create:{storageKey:body.sourceStorageKey,bytesExpected:body.bytesExpected,status:"CREATED"}}},include:{uploads:true}});await audit(req as AuthRequest,"VIDEO_ASSET_CREATED","VIDEO_ASSET",asset.id);return reply.code(201).send(asset)});
-app.get("/api/v1/admin/video-assets/:id/preview",async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const query=z.object({token:z.preprocess(value=>value===""?undefined:value,z.string().min(20).optional())}).parse(req.query);if(query.token){try{const payload=await verifyAccess(query.token);if(!payload.sub||typeof payload.role!=="string"||!isAdminRole(payload.role as Role))return sendError(reply,req.id,403,"FORBIDDEN","Administrator access required");await requireActiveSubject(payload.sub,req,reply);if(reply.sent)return;(req as AuthRequest).auth={sub:String(payload.sub),role:payload.role as Role}}catch{return sendError(reply,req.id,401,"TOKEN_INVALID","Session expired")}}else{await authenticate(req,reply);if(reply.sent)return;if(!isAdminRole((req as AuthRequest).auth.role))return sendError(reply,req.id,403,"FORBIDDEN","Administrator access required")}const asset=await prisma.videoAsset.findUnique({where:{id},include:{movie:true,episode:true}});const previewKey=asset?.manifestStorageKey??asset?.sourceStorageKey;if(!previewKey)return sendError(reply,req.id,404,"PREVIEW_NOT_FOUND","Preview file is unavailable");const filePath=storagePathFor(previewKey);if(!filePath)return sendError(reply,req.id,400,"PREVIEW_INVALID","Preview path is invalid");let size=0;try{size=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"PREVIEW_NOT_FOUND","Preview file is unavailable")};const range=req.headers.range;reply.header("accept-ranges","bytes");reply.header("cache-control","private, max-age=60");reply.header("content-type",contentTypeFor(previewKey));if(range){const match=range.match(/bytes=(\d*)-(\d*)/);const startRaw=match?.[1],endRaw=match?.[2];const start=startRaw?Number(startRaw):0;const end=endRaw?Math.min(Number(endRaw),size-1):size-1;if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=size)return reply.code(416).header("content-range",`bytes */${size}`).send();reply.code(206).header("content-range",`bytes ${start}-${end}/${size}`).header("content-length",String(end-start+1));return reply.send(createReadStream(filePath,{start,end}))}reply.header("content-length",String(size));return reply.send(createReadStream(filePath))});
-app.get("/api/v1/media/images/:key",async(req,reply)=>{const key=decodeURIComponent(z.object({key:z.string().min(1)}).parse(req.params).key);const filePath=storagePathFor(key);if(!filePath||!key.startsWith("thumbnails/"))return sendError(reply,req.id,400,"IMAGE_INVALID","Image path is invalid");let size=0;try{size=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"IMAGE_NOT_FOUND","Image file is unavailable")};reply.header("cache-control","public, max-age=86400").header("content-type",contentTypeFor(key)).header("content-length",String(size));return reply.send(createReadStream(filePath))});
-app.get("/api/v1/admin/uploads/:id/progress",{preHandler:requirePermission("catalog:write")},async(req)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;return conversionProgress.get(id)??{phase:"Waiting",progress:0,updatedAt:Date.now()}});
-app.post("/api/v1/admin/uploads/direct",{preHandler:[requirePermission("catalog:write"),requireCsrf],config:{rateLimit:{max:8,timeWindow:"15 minutes"}}},async(req,reply)=>{
-  const uploadIdHeader=typeof req.headers["x-upload-id"]==="string"?req.headers["x-upload-id"]:"";
-  const requestedUploadId=z.string().uuid().safeParse(uploadIdHeader).success?uploadIdHeader:undefined;
-  const parts=req.parts();
-  let title="",synopsis="",maturityRating="";
-  let file:{filename:string;mimetype:string;bytes:number;storageKey:string;previewStorageKey:string;thumbnailStorageKey?:string;durationSeconds:number;sourcePath:string}|undefined;
-  for await(const part of parts){
-    if(part.type==="field"){const value=String(part.value??"");if(part.fieldname==="title")title=value;if(part.fieldname==="synopsis")synopsis=value;if(part.fieldname==="maturityRating")maturityRating=value;continue}
-    if(part.fieldname!=="file")continue;
-    const uploadId=requestedUploadId??randomUUID();
-    const safeName=part.filename.replace(/[^a-zA-Z0-9._-]/g,"_");
-    const storageKey=`uploads/${uploadId}-${safeName}`;
-    const previewStorageKey=`previews/${uploadId}.mp4`;
-    const thumbnailStorageKey=`thumbnails/${uploadId}.jpg`;
-    const destination=path.join(storageRoot,storageKey);
-    const previewDestination=path.join(storageRoot,previewStorageKey);
-    const thumbnailDestination=path.join(storageRoot,thumbnailStorageKey);
-    try{
-      await mkdir(path.dirname(destination),{recursive:true});
-      await mkdir(path.dirname(previewDestination),{recursive:true});
-      await mkdir(path.dirname(thumbnailDestination),{recursive:true});
-      let bytes=0;
-      part.file.on("data",(chunk:Buffer)=>bytes+=chunk.length);
-      await pipeline(part.file,createWriteStream(destination));
-      const durationSeconds=Math.round(await probeDurationSeconds(destination)??0);
-      rememberConversion(uploadId,"Converting preview",0);
-      try{await transcodePreview(destination,previewDestination,progress=>rememberConversion(uploadId,"Converting preview",progress));rememberConversion(uploadId,"Ready",100);forgetConversionLater(uploadId)}
-      catch(error){rememberConversion(uploadId,"Preview conversion failed",100);forgetConversionLater(uploadId);req.log.warn({err:error,filename:part.filename},"preview transcode failed; falling back to source file")}
-      const finalPreviewKey=await stat(previewDestination).then(()=>previewStorageKey).catch(()=>storageKey);
-      const thumbnailInput=storagePathFor(finalPreviewKey)??destination;
-      await generateThumbnail(thumbnailInput,thumbnailDestination).catch(error=>req.log.warn({err:error,filename:part.filename},"thumbnail generation failed"));
-      file={filename:part.filename,mimetype:part.mimetype,bytes,storageKey,sourcePath:destination,previewStorageKey:finalPreviewKey,thumbnailStorageKey:await stat(thumbnailDestination).then(()=>thumbnailStorageKey).catch(()=>undefined),durationSeconds};
-    }catch(error){req.log.error({err:error,storageRoot},"upload storage write failed");return sendError(reply,req.id,500,"UPLOAD_STORAGE_UNWRITABLE",`Upload storage is not writable at ${storageRoot}. Set STORAGE_LOCAL_ROOT to a writable volume.`)}
+const slugify = (input: string) =>
+  input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 80);
+const contentTypeFor = (key: string) => {
+  const lower = key.toLowerCase();
+  return lower.endsWith(".mp4")
+    ? "video/mp4"
+    : lower.endsWith(".webm")
+      ? "video/webm"
+      : lower.endsWith(".mov")
+        ? "video/quicktime"
+        : lower.endsWith(".mkv")
+          ? "video/x-matroska"
+          : lower.endsWith(".m3u8")
+            ? "application/vnd.apple.mpegurl"
+            : lower.endsWith(".jpg") || lower.endsWith(".jpeg")
+              ? "image/jpeg"
+              : lower.endsWith(".png")
+                ? "image/png"
+                : "application/octet-stream";
+};
+const storagePathFor = (key: string) => {
+  const root = path.resolve(storageRoot);
+  const filePath = path.resolve(root, key);
+  return filePath.startsWith(root + path.sep) ? filePath : null;
+};
+const storageKeyFromMediaImageUrl = (value: string | null | undefined) => {
+  if (!value) return null;
+  const marker = "/api/v1/media/images/";
+  const index = value.indexOf(marker);
+  return index >= 0 ? decodeURIComponent(value.slice(index + marker.length)) : null;
+};
+type StorageFile = { key: string; path: string; size: number; mtimeMs: number };
+const listStorageFiles = async (dir = storageRoot): Promise<StorageFile[]> => {
+  let entries: { name: string; isDirectory: () => boolean; isFile: () => boolean }[] = [];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
   }
-  if(!title.trim()||!file)return sendError(reply,req.id,400,"UPLOAD_INVALID","Title and video file are required");
-  const thumbnailUrl=file.thumbnailStorageKey?absoluteApiUrl(req,`/api/v1/media/images/${encodeURIComponent(file.thumbnailStorageKey)}`):undefined;
-  const movie=await prisma.movie.create({data:{title:title.trim(),synopsis:synopsis.trim()||"Uploaded from admin console.",slug:`${slugify(title)}-${Date.now()}`,status:"DRAFT",posterUrl:thumbnailUrl,backdropUrl:thumbnailUrl,maturityRating:maturityRating.trim()||undefined,assets:{create:{state:"READY",sourceStorageKey:file.storageKey,manifestStorageKey:file.previewStorageKey,durationSeconds:file.durationSeconds||undefined,uploads:{create:{storageKey:file.storageKey,bytesExpected:file.bytes,bytesReceived:file.bytes,status:"COMPLETED"}}}}},include:{assets:true}});
-  const asset=movie.assets[0];
-  let originalDeleted=false;
-  if(asset&&file.previewStorageKey!==file.storageKey&&await getBooleanSetting(deleteOriginalAfterPreviewKey,false)){
-    const previewPath=storagePathFor(file.previewStorageKey);
-    const previewBytes=previewPath?Number((await stat(previewPath).catch(()=>({size:file.bytes}))).size):file.bytes;
-    await unlink(file.sourcePath).then(()=>{originalDeleted=true}).catch(error=>req.log.warn({err:error,storageKey:file.storageKey},"could not delete original after preview"));
-    if(originalDeleted)await prisma.$transaction([
-      prisma.videoAsset.update({where:{id:asset.id},data:{sourceStorageKey:file.previewStorageKey}}),
-      prisma.upload.updateMany({where:{videoAssetId:asset.id,storageKey:file.storageKey},data:{storageKey:file.previewStorageKey,bytesExpected:previewBytes,bytesReceived:previewBytes}})
-    ]);
+  const nested = await Promise.all(
+    entries.map(async (entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) return listStorageFiles(full);
+      if (!entry.isFile()) return [];
+      const info = await stat(full).catch(() => undefined);
+      if (!info) return [];
+      const key = path.relative(storageRoot, full).split(path.sep).join("/");
+      return [{ key, path: full, size: info.size, mtimeMs: info.mtimeMs }];
+    }),
+  );
+  return nested.flat();
+};
+const referencedStorageKeys = async () => {
+  const [assets, uploads, renditions, movies, series] = await Promise.all([
+    prisma.videoAsset.findMany({ select: { sourceStorageKey: true, manifestStorageKey: true } }),
+    prisma.upload.findMany({ select: { storageKey: true } }),
+    prisma.videoRendition.findMany({ select: { storageKey: true } }),
+    prisma.movie.findMany({ select: { posterUrl: true, backdropUrl: true } }),
+    prisma.series.findMany({ select: { posterUrl: true, backdropUrl: true } }),
+  ]);
+  return new Set(
+    [
+      ...assets.flatMap((asset) => [asset.sourceStorageKey, asset.manifestStorageKey]),
+      ...uploads.map((upload) => upload.storageKey),
+      ...renditions.map((rendition) => rendition.storageKey),
+      ...movies.flatMap((movie) => [
+        storageKeyFromMediaImageUrl(movie.posterUrl),
+        storageKeyFromMediaImageUrl(movie.backdropUrl),
+      ]),
+      ...series.flatMap((item) => [
+        storageKeyFromMediaImageUrl(item.posterUrl),
+        storageKeyFromMediaImageUrl(item.backdropUrl),
+      ]),
+    ].filter(Boolean) as string[],
+  );
+};
+const storageCleanupReport = async (execute = false) => {
+  const referenced = await referencedStorageKeys();
+  const files = await listStorageFiles();
+  const cutoff = Date.now() - 60 * 60_000;
+  const orphaned = files.filter((file) => !referenced.has(file.key) && file.mtimeMs < cutoff);
+  let deletedFiles = 0,
+    deletedBytes = 0;
+  const failed: string[] = [];
+  if (execute) {
+    for (const file of orphaned) {
+      await unlink(file.path)
+        .then(() => {
+          deletedFiles++;
+          deletedBytes += file.size;
+        })
+        .catch(() => failed.push(file.key));
+    }
+    const stale = Date.now() - 24 * 60 * 60_000;
+    for (const [id, item] of conversionProgress) if (item.updatedAt < stale) conversionProgress.delete(id);
+    for (const [id, job] of editorJobs)
+      if (new Date(job.updatedAt).getTime() < stale && job.status !== "RUNNING" && job.status !== "QUEUED")
+        editorJobs.delete(id);
   }
-  await audit(req as AuthRequest,"DIRECT_UPLOAD_COMPLETED","MOVIE",movie.id,{filename:file.filename,bytes:file.bytes,mimetype:file.mimetype,previewStorageKey:file.previewStorageKey,thumbnailStorageKey:file.thumbnailStorageKey,durationSeconds:file.durationSeconds,originalDeleted});
-  return reply.code(201).send(originalDeleted?await prisma.movie.findUnique({where:{id:movie.id},include:{assets:true}}):movie)
+  return {
+    storageRoot,
+    totalFiles: files.length,
+    referencedFiles: files.length - orphaned.length,
+    orphanedFiles: orphaned.length,
+    reclaimableBytes: orphaned.reduce((sum, file) => sum + file.size, 0),
+    deletedFiles,
+    deletedBytes,
+    failed,
+    preview: orphaned
+      .slice(0, 25)
+      .map((file) => ({ key: file.key, sizeBytes: file.size, modifiedAt: new Date(file.mtimeMs).toISOString() })),
+  };
+};
+const storageBreakdownReport = async () => {
+  const files = await listStorageFiles();
+  const buckets: { name: string; match: (key: string) => boolean }[] = [
+    { name: "Backups", match: (key) => key.startsWith("backups/") },
+    { name: "Source uploads", match: (key) => key.startsWith("uploads/") },
+    { name: "MP4 previews", match: (key) => key.startsWith("previews/") || key.endsWith(".mp4") },
+    {
+      name: "Thumbnails",
+      match: (key) => key.startsWith("thumbnails/") || key.match(/\.(jpg|jpeg|png|webp)$/i) !== null,
+    },
+    { name: "Edited clips", match: (key) => key.startsWith("edits/") },
+    { name: "Other", match: () => true },
+  ];
+  const categories = buckets.map((bucket) => ({ name: bucket.name, files: [] as StorageFile[] }));
+  for (const file of files) {
+    const category = categories.find(
+      (item) => item.name !== "Other" && buckets.find((bucket) => bucket.name === item.name)?.match(file.key),
+    );
+    (category ?? categories[categories.length - 1]!).files.push(file);
+  }
+  const storage = await statfs(storageRoot).catch(() => undefined);
+  const totalBytes = storage ? storage.blocks * storage.bsize : 0;
+  const freeBytes = storage ? storage.bavail * storage.bsize : 0;
+  const warningPercent = Number(await getSetting("storageWarningPercent", 80));
+  return {
+    checkedAt: new Date().toISOString(),
+    storageRoot,
+    totalBytes,
+    freeBytes,
+    usedBytes: Math.max(0, totalBytes - freeBytes),
+    usedPercent: totalBytes ? Math.round(((totalBytes - freeBytes) / totalBytes) * 100) : 0,
+    warningPercent,
+    warning: totalBytes ? Math.round(((totalBytes - freeBytes) / totalBytes) * 100) >= warningPercent : false,
+    categories: categories
+      .filter((category) => category.files.length)
+      .map((category) => ({
+        name: category.name,
+        fileCount: category.files.length,
+        sizeBytes: category.files.reduce((sum, file) => sum + file.size, 0),
+        largest: category.files
+          .sort((a, b) => b.size - a.size)
+          .slice(0, 8)
+          .map((file) => ({ key: file.key, sizeBytes: file.size, modifiedAt: new Date(file.mtimeMs).toISOString() })),
+      })),
+  };
+};
+const firstHeader = (value: string | string[] | undefined) => (Array.isArray(value) ? value[0] : value);
+const absoluteApiUrl = (req: FastifyRequest, pathname: string) => {
+  const proto = firstHeader(req.headers["x-forwarded-proto"]) ?? (config.NODE_ENV === "production" ? "https" : "http");
+  const host = firstHeader(req.headers["x-forwarded-host"]) ?? req.headers.host ?? "localhost:4000";
+  return `${proto}://${host}${pathname}`;
+};
+type ConversionProgress = { phase: string; progress: number; updatedAt: number };
+const conversionProgress = new Map<string, ConversionProgress>();
+const rememberConversion = (id: string, phase: string, progress: number) =>
+  conversionProgress.set(id, {
+    phase,
+    progress: Math.max(0, Math.min(100, Math.round(progress))),
+    updatedAt: Date.now(),
+  });
+const forgetConversionLater = (id: string) => setTimeout(() => conversionProgress.delete(id), 10 * 60_000);
+type EditorJob = {
+  id: string;
+  assetId: string;
+  title: string;
+  sourceTitle: string;
+  startSeconds: number;
+  endSeconds: number;
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  progress: number;
+  phase: string;
+  createdAt: string;
+  updatedAt: string;
+  resultMovieId?: string;
+  resultAssetId?: string;
+  error?: string;
+};
+const editorJobs = new Map<string, EditorJob>();
+const rememberEditorJob = (
+  job: EditorJob,
+  phase: string,
+  progress: number,
+  status: EditorJob["status"] = job.status,
+) => {
+  job.phase = phase;
+  job.progress = Math.max(0, Math.min(100, Math.round(progress)));
+  job.status = status;
+  job.updatedAt = new Date().toISOString();
+  editorJobs.set(job.id, job);
+};
+const probeDurationSeconds = (input: string) =>
+  new Promise<number | undefined>((resolve) => {
+    const ffprobe = spawn(
+      "ffprobe",
+      ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let output = "";
+    ffprobe.stdout.on("data", (chunk) => (output += String(chunk)));
+    ffprobe.on("error", () => resolve(undefined));
+    ffprobe.on("close", () => {
+      const seconds = Number(output.trim());
+      resolve(Number.isFinite(seconds) && seconds > 0 ? seconds : undefined);
+    });
+  });
+const mp4QualityArgs = process.env.FFMPEG_CRF ? ["-crf", process.env.FFMPEG_CRF] : [];
+const mp4CompressionArgs = [
+  "-c:v",
+  "libx264",
+  "-preset",
+  process.env.FFMPEG_PRESET ?? "veryfast",
+  ...mp4QualityArgs,
+  "-pix_fmt",
+  "yuv420p",
+  "-c:a",
+  "aac",
+  "-b:a",
+  process.env.FFMPEG_AUDIO_BITRATE ?? "128k",
+  "-movflags",
+  "+faststart",
+];
+const generateThumbnail = async (input: string, output: string) =>
+  new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn(
+      "ffmpeg",
+      ["-y", "-ss", "00:00:01", "-i", input, "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3", output],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let err = "";
+    ffmpeg.stderr.on("data", (chunk) => (err = (err + String(chunk)).slice(-4000)));
+    ffmpeg.on("error", reject);
+    ffmpeg.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(err || `ffmpeg thumbnail exited with code ${code}`)),
+    );
+  });
+const transcodePreview = async (input: string, output: string, onProgress: (progress: number) => void) => {
+  const duration = await probeDurationSeconds(input);
+  await new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn(
+      "ffmpeg",
+      [
+        "-y",
+        "-i",
+        input,
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        ...mp4CompressionArgs,
+        "-progress",
+        "pipe:2",
+        "-nostats",
+        output,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let err = "",
+      buffer = "",
+      fallback = 0;
+    ffmpeg.stderr.on("data", (chunk) => {
+      const text = String(chunk);
+      err = (err + text).slice(-4000);
+      buffer += text;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const separator = line.indexOf("=");
+        if (separator < 0) continue;
+        const key = line.slice(0, separator);
+        const value = line.slice(separator + 1);
+        if (key === "out_time_ms" && duration) {
+          const seconds = Number(value) / 1_000_000;
+          if (Number.isFinite(seconds)) onProgress(Math.min(99, (seconds / duration) * 100));
+        } else if (key === "progress" && value === "continue" && !duration) {
+          fallback = Math.min(95, fallback + 1);
+          onProgress(fallback);
+        }
+      }
+    });
+    ffmpeg.on("error", reject);
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        onProgress(100);
+        resolve();
+      } else reject(new Error(err || `ffmpeg exited with code ${code}`));
+    });
+  });
+};
+const trimVideo = async (
+  input: string,
+  output: string,
+  startSeconds: number,
+  endSeconds: number,
+  onProgress: (progress: number) => void,
+) => {
+  const trimDuration = Math.max(1, endSeconds - startSeconds);
+  await new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn(
+      "ffmpeg",
+      [
+        "-y",
+        "-ss",
+        String(startSeconds),
+        "-i",
+        input,
+        "-t",
+        String(trimDuration),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        ...mp4CompressionArgs,
+        "-progress",
+        "pipe:2",
+        "-nostats",
+        output,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let err = "",
+      buffer = "",
+      fallback = 0;
+    ffmpeg.stderr.on("data", (chunk) => {
+      const text = String(chunk);
+      err = (err + text).slice(-4000);
+      buffer += text;
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const separator = line.indexOf("=");
+        if (separator < 0) continue;
+        const key = line.slice(0, separator);
+        const value = line.slice(separator + 1);
+        if (key === "out_time_ms") {
+          const seconds = Number(value) / 1_000_000;
+          if (Number.isFinite(seconds)) onProgress(Math.min(99, (seconds / trimDuration) * 100));
+        } else if (key === "progress" && value === "continue") {
+          fallback = Math.min(95, fallback + 1);
+          onProgress(fallback);
+        }
+      }
+    });
+    ffmpeg.on("error", reject);
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        onProgress(100);
+        resolve();
+      } else reject(new Error(err || `ffmpeg exited with code ${code}`));
+    });
+  });
+};
+type MovieWithAssets = {
+  assets?: {
+    id: string;
+    state: string;
+    durationSeconds: number | null;
+    manifestStorageKey: string | null;
+    sourceStorageKey: string;
+  }[];
+};
+const ensureMovieDurations = async (movies: MovieWithAssets[]) => {
+  await Promise.all(
+    movies.flatMap((movie) =>
+      (movie.assets ?? [])
+        .filter((asset) => asset.state === "READY" && !(asset.durationSeconds && asset.durationSeconds > 0))
+        .map(async (asset) => {
+          const keys = [asset.manifestStorageKey, asset.sourceStorageKey].filter(Boolean) as string[];
+          let duration = 0;
+          for (const key of keys) {
+            const filePath = storagePathFor(key);
+            if (!filePath) continue;
+            duration = Math.round((await probeDurationSeconds(filePath)) ?? 0);
+            if (duration > 0) break;
+          }
+          if (duration > 0) {
+            asset.durationSeconds = duration;
+            await prisma.videoAsset
+              .update({ where: { id: asset.id }, data: { durationSeconds: duration } })
+              .catch(() => undefined);
+          }
+        }),
+    ),
+  );
+};
+const backupTables = [
+  ["movies", "movie"],
+  ["series", "series"],
+  ["seasons", "season"],
+  ["episodes", "episode"],
+  ["collections", "collection"],
+  ["users", "user"],
+  ["videoAssets", "videoAsset"],
+  ["videoRenditions", "videoRendition"],
+  ["collectionItems", "collectionItem"],
+  ["userMovieAccess", "userMovieAccess"],
+  ["userCollectionAccess", "userCollectionAccess"],
+  ["uploads", "upload"],
+  ["platformSettings", "platformSetting"],
+  ["supportConversations", "supportConversation"],
+  ["supportMessages", "supportMessage"],
+  ["userNotifications", "userNotification"],
+  ["watchProgress", "watchProgress"],
+  ["watchHistory", "watchHistory"],
+  ["myListItems", "myListItem"],
+] as const;
+const backupReplacer = (_key: string, value: unknown) => (typeof value === "bigint" ? value.toString() : value);
+const tarPad = (size: number) => (size % 512 === 0 ? 0 : 512 - (size % 512));
+const tarOctal = (value: number, length: number) => {
+  const text = value.toString(8).slice(0, length - 1);
+  return text.padStart(length - 1, "0") + "\0";
+};
+const tarHeader = (name: string, size: number, mtime = Math.floor(Date.now() / 1000)) => {
+  const header = Buffer.alloc(512);
+  let fileName = name,
+    prefix = "";
+  if (Buffer.byteLength(name) > 100) {
+    const slash = name.lastIndexOf("/");
+    if (slash > 0) {
+      prefix = name.slice(0, slash);
+      fileName = name.slice(slash + 1);
+    }
+  }
+  header.write(fileName.slice(0, 100), 0);
+  header.write(tarOctal(0o644, 8), 100);
+  header.write(tarOctal(0, 8), 108);
+  header.write(tarOctal(0, 8), 116);
+  header.write(tarOctal(size, 12), 124);
+  header.write(tarOctal(mtime, 12), 136);
+  header.fill(" ", 148, 156);
+  header.write("0", 156);
+  header.write("ustar\0", 257);
+  header.write("00", 263);
+  if (prefix) header.write(prefix.slice(0, 155), 345);
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  header.write(tarOctal(sum, 8), 148);
+  return header;
+};
+async function writeTarBuffer(out: Awaited<ReturnType<typeof open>>, name: string, buffer: Buffer) {
+  await out.write(tarHeader(name, buffer.length));
+  await out.write(buffer);
+  const pad = tarPad(buffer.length);
+  if (pad) await out.write(Buffer.alloc(pad));
+}
+async function writeTarFile(
+  out: Awaited<ReturnType<typeof open>>,
+  name: string,
+  filePath: string,
+  size: number,
+  mtimeMs: number,
+) {
+  await out.write(tarHeader(name, size, Math.floor(mtimeMs / 1000)));
+  const input = await open(filePath, "r");
+  try {
+    const chunk = Buffer.alloc(1024 * 1024);
+    let position = 0;
+    while (position < size) {
+      const read = await input.read(chunk, 0, Math.min(chunk.length, size - position), position);
+      if (!read.bytesRead) break;
+      await out.write(chunk.subarray(0, read.bytesRead));
+      position += read.bytesRead;
+    }
+  } finally {
+    await input.close();
+  }
+  const pad = tarPad(size);
+  if (pad) await out.write(Buffer.alloc(pad));
+}
+async function backupPayload() {
+  const tables: Record<string, unknown[]> = {};
+  for (const [key, model] of backupTables) {
+    tables[key] = await (prisma[model] as unknown as { findMany: (args?: unknown) => Promise<unknown[]> }).findMany();
+  }
+  return {
+    format: "securestream-portable-backup",
+    version: 1,
+    createdAt: new Date().toISOString(),
+    notes:
+      "Portable backup stores relative media keys only. It is safe to restore on a server with a different URL or port.",
+    tables,
+  };
+}
+async function createPortableBackup() {
+  const backupsDir = path.join(storageRoot, "backups");
+  await mkdir(backupsDir, { recursive: true });
+  const name = `securestream-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.tar`;
+  const filePath = path.join(backupsDir, name);
+  const media = (await listStorageFiles()).filter((file) => !file.key.startsWith("backups/"));
+  const payload = await backupPayload();
+  const manifest = Buffer.from(
+    JSON.stringify(
+      {
+        ...payload,
+        media: media.map((file) => ({
+          key: file.key,
+          sizeBytes: file.size,
+          modifiedAt: new Date(file.mtimeMs).toISOString(),
+        })),
+      },
+      backupReplacer,
+      2,
+    ),
+  );
+  const out = await open(filePath, "w");
+  try {
+    await writeTarBuffer(out, "securestream-backup.json", manifest);
+    for (const file of media) await writeTarFile(out, `media/${file.key}`, file.path, file.size, file.mtimeMs);
+    await out.write(Buffer.alloc(1024));
+  } finally {
+    await out.close();
+  }
+  const info = await stat(filePath);
+  return { name, sizeBytes: info.size, createdAt: new Date(info.mtimeMs).toISOString(), mediaFiles: media.length };
+}
+const safeBackupName = (name: string) => (name.match(/^securestream-backup-[a-zA-Z0-9_.-]+\.tar$/) ? name : null);
+async function listBackups() {
+  const backupsDir = path.join(storageRoot, "backups");
+  await mkdir(backupsDir, { recursive: true });
+  const entries = await readdir(backupsDir, { withFileTypes: true }).catch(() => []);
+  const files = await Promise.all(
+    entries
+      .filter((entry) => entry.isFile() && safeBackupName(entry.name))
+      .map(async (entry) => {
+        const filePath = path.join(backupsDir, entry.name);
+        const info = await stat(filePath);
+        return { name: entry.name, sizeBytes: info.size, createdAt: new Date(info.mtimeMs).toISOString() };
+      }),
+  );
+  return files.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+function driveConfig() {
+  const raw = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON;
+  const folderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
+  if (!raw || !folderId) return null;
+  const json = raw.trim().startsWith("{") ? raw : Buffer.from(raw, "base64").toString("utf8");
+  const account = JSON.parse(json) as { client_email: string; private_key: string; token_uri?: string };
+  return {
+    folderId,
+    clientEmail: account.client_email,
+    privateKey: account.private_key,
+    tokenUri: account.token_uri ?? "https://oauth2.googleapis.com/token",
+  };
+}
+async function driveAccessToken() {
+  const drive = driveConfig();
+  if (!drive)
+    throw new Error(
+      "Google Drive is not configured. Set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON and GOOGLE_DRIVE_FOLDER_ID.",
+    );
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    Buffer.from(drive.privateKey.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, ""), "base64"),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const assertion = await new SignJWT({ scope: "https://www.googleapis.com/auth/drive.file" })
+    .setProtectedHeader({ alg: "RS256", typ: "JWT" })
+    .setIssuer(drive.clientEmail)
+    .setAudience(drive.tokenUri)
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(key);
+  const response = await fetch(drive.tokenUri, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }),
+  });
+  const payload = (await response.json()) as { access_token?: string; error_description?: string };
+  if (!response.ok || !payload.access_token)
+    throw new Error(payload.error_description ?? "Google Drive authentication failed");
+  return { token: payload.access_token, folderId: drive.folderId };
+}
+async function uploadBackupToDrive(name: string) {
+  const safe = safeBackupName(name);
+  if (!safe) throw new Error("Backup file name is invalid");
+  const filePath = path.join(storageRoot, "backups", safe);
+  const info = await stat(filePath);
+  const { token, folderId } = await driveAccessToken();
+  const start = await fetch(
+    "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,webViewLink,webContentLink",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json; charset=UTF-8",
+        "x-upload-content-type": "application/x-tar",
+        "x-upload-content-length": String(info.size),
+      },
+      body: JSON.stringify({ name: safe, parents: [folderId], mimeType: "application/x-tar" }),
+    },
+  );
+  if (!start.ok) throw new Error(`Google Drive upload session failed: ${await start.text()}`);
+  const session = start.headers.get("location");
+  if (!session) throw new Error("Google Drive did not return an upload session");
+  const upload = await fetch(session, {
+    method: "PUT",
+    headers: { "content-type": "application/x-tar", "content-length": String(info.size) },
+    body: createReadStream(filePath) as unknown as BodyInit,
+    duplex: "half",
+  } as RequestInit & { duplex: "half" });
+  const payload = (await upload.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!upload.ok) throw new Error(`Google Drive upload failed: ${JSON.stringify(payload)}`);
+  return payload;
+}
+async function validatePortableBackup(tarPath: string) {
+  const fh = await open(tarPath, "r");
+  let position = 0;
+  let manifest: Record<string, unknown> | undefined;
+  let mediaFiles = 0;
+  try {
+    while (true) {
+      const header = Buffer.alloc(512);
+      const read = await fh.read(header, 0, 512, position);
+      if (!read.bytesRead || header.every((byte) => byte === 0)) break;
+      position += 512;
+      const namePart = header.subarray(0, 100).toString().replace(/\0.*$/, "");
+      const prefix = header.subarray(345, 500).toString().replace(/\0.*$/, "");
+      const rawName = prefix ? `${prefix}/${namePart}` : namePart;
+      const size = parseInt(header.subarray(124, 136).toString().replace(/\0.*$/, "").trim() || "0", 8);
+      if (!rawName) {
+        position += size + tarPad(size);
+        continue;
+      }
+      if (rawName.includes("..") || path.isAbsolute(rawName) || rawName.includes("\\"))
+        throw new Error(`Unsafe backup path: ${rawName}`);
+      if (rawName === "securestream-backup.json") {
+        const buffer = Buffer.alloc(size);
+        await fh.read(buffer, 0, size, position);
+        manifest = JSON.parse(buffer.toString());
+      } else if (rawName.startsWith("media/")) {
+        const key = rawName.slice("media/".length);
+        if (!key || !storagePathFor(key)) throw new Error(`Unsafe media path: ${rawName}`);
+        mediaFiles++;
+      } else throw new Error(`Unexpected backup entry: ${rawName}`);
+      position += size + tarPad(size);
+    }
+  } finally {
+    await fh.close();
+  }
+  if (
+    !manifest ||
+    manifest.format !== "securestream-portable-backup" ||
+    manifest.version !== 1 ||
+    typeof manifest.tables !== "object"
+  )
+    throw new Error("Invalid SecureStream backup file");
+  return { manifest, mediaFiles };
+}
+async function restoreDatabase(tables: Record<string, unknown[]>) {
+  await prisma.$transaction(
+    async (tx) => {
+      for (const model of [
+        "userNotification",
+        "supportMessage",
+        "supportConversation",
+        "myListItem",
+        "watchHistory",
+        "watchProgress",
+        "playbackSession",
+        "upload",
+        "videoRendition",
+        "userMovieAccess",
+        "userCollectionAccess",
+        "collectionItem",
+        "videoAsset",
+        "episode",
+        "season",
+        "series",
+        "movie",
+        "user",
+        "collection",
+      ])
+        await (tx[model as keyof typeof tx] as unknown as { deleteMany: () => Promise<unknown> }).deleteMany();
+      const ordered: Record<string, unknown[]> = {
+        ...tables,
+        collections: [...(tables.collections ?? [])].sort(
+          (a, b) =>
+            Number(Boolean((a as Record<string, unknown>).parentId)) -
+            Number(Boolean((b as Record<string, unknown>).parentId)),
+        ),
+      };
+      for (const [key, model] of backupTables) {
+        const data = (ordered[key] ?? []) as never[];
+        if (data.length)
+          await (tx[model] as unknown as { createMany: (args: unknown) => Promise<unknown> }).createMany({
+            data,
+            skipDuplicates: true,
+          });
+      }
+    },
+    { timeout: 120_000 },
+  );
+}
+async function restorePortableBackup(tarPath: string) {
+  const validation = await validatePortableBackup(tarPath);
+  const manifest = validation.manifest;
+  const fh = await open(tarPath, "r");
+  let position = 0,
+    mediaFiles = 0;
+  try {
+    while (true) {
+      const header = Buffer.alloc(512);
+      const read = await fh.read(header, 0, 512, position);
+      if (!read.bytesRead || header.every((byte) => byte === 0)) break;
+      position += 512;
+      const namePart = header.subarray(0, 100).toString().replace(/\0.*$/, "");
+      const prefix = header.subarray(345, 500).toString().replace(/\0.*$/, "");
+      const rawName = prefix ? `${prefix}/${namePart}` : namePart;
+      const size = parseInt(header.subarray(124, 136).toString().replace(/\0.*$/, "").trim() || "0", 8);
+      if (rawName.startsWith("media/")) {
+        const key = rawName.slice("media/".length);
+        const destination = storagePathFor(key);
+        if (destination) {
+          await mkdir(path.dirname(destination), { recursive: true });
+          const out = await open(destination, "w");
+          try {
+            const chunk = Buffer.alloc(1024 * 1024);
+            let remaining = size,
+              offset = position;
+            while (remaining > 0) {
+              const readSize = Math.min(chunk.length, remaining);
+              const part = await fh.read(chunk, 0, readSize, offset);
+              if (!part.bytesRead) break;
+              await out.write(chunk.subarray(0, part.bytesRead));
+              remaining -= part.bytesRead;
+              offset += part.bytesRead;
+            }
+          } finally {
+            await out.close();
+          }
+          mediaFiles++;
+        }
+      }
+      position += size + tarPad(size);
+    }
+  } finally {
+    await fh.close();
+  }
+  await restoreDatabase((manifest.tables ?? {}) as Record<string, unknown[]>);
+  return {
+    restored: true,
+    mediaFiles,
+    tables: Object.fromEntries(
+      Object.entries((manifest.tables ?? {}) as Record<string, unknown[]>).map(([key, value]) => [key, value.length]),
+    ),
+  };
+}
+const adminCookieSameSite = config.NODE_ENV === "production" ? ("none" as const) : ("strict" as const);
+const storageRoot = process.env.STORAGE_LOCAL_ROOT ?? "/data/media";
+const offlineDownloadTtlSeconds = 7 * 24 * 60 * 60;
+const apiTokenPrefix = "ss_pat_";
+const deleteOriginalAfterPreviewKey = "deleteOriginalAfterPreview";
+const getBooleanSetting = async (key: string, fallback = false) => {
+  const setting = await prisma.platformSetting.findUnique({ where: { key } });
+  return typeof setting?.value === "boolean" ? setting.value : fallback;
+};
+const setBooleanSetting = (key: string, value: boolean) =>
+  prisma.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } });
+const getSetting = async <T>(key: string, fallback: T) => {
+  const setting = await prisma.platformSetting.findUnique({ where: { key } });
+  return setting?.value === undefined ? fallback : (setting.value as T);
+};
+const setSetting = (key: string, value: Prisma.InputJsonValue) =>
+  prisma.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } });
+const maintenanceSettings = async () => ({
+  enabled: await getBooleanSetting("maintenanceMode", false),
+  message: await getSetting("maintenanceMessage", "SecureStream is under maintenance. Please try again later."),
 });
-app.post("/api/v1/admin/uploads/:id/parts",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({partCount:z.number().int().min(1).max(1000)}).parse(req.body);const parts=Array.from({length:body.partCount},(_,i)=>({partNumber:i+1,uploadUrl:`/api/v1/admin/uploads/${id}/parts/${i+1}`}));const upload=await prisma.upload.update({where:{id},data:{status:"PARTS_ISSUED",parts}});await audit(req as AuthRequest,"UPLOAD_PARTS_ISSUED","UPLOAD",id,{partCount:body.partCount});return {...upload,parts}});
-app.post("/api/v1/admin/uploads/:id/complete",{preHandler:[requirePermission("catalog:write"),requireCsrf]},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const body=z.object({bytesReceived:z.number().int().positive(),durationSeconds:z.number().int().positive().optional(),manifestStorageKey:z.string().min(1).optional()}).parse(req.body);const upload=await prisma.upload.findUnique({where:{id},include:{videoAsset:true}});if(!upload)return sendError(reply,req.id,404,"UPLOAD_NOT_FOUND","Upload not found");if(BigInt(body.bytesReceived)>upload.bytesExpected)return sendError(reply,req.id,400,"UPLOAD_TOO_LARGE","Received bytes exceed declared upload size");const asset=await prisma.$transaction(async(tx)=>{await tx.upload.update({where:{id},data:{status:"COMPLETED",bytesReceived:body.bytesReceived}});return tx.videoAsset.update({where:{id:upload.videoAssetId},data:{state:body.manifestStorageKey?"READY":"QUEUED",durationSeconds:body.durationSeconds,manifestStorageKey:body.manifestStorageKey}})});if(!body.manifestStorageKey)await processingQueue.add("transcode",{assetId:asset.id,input:upload.storageKey,output:`${upload.videoAssetId}/manifest.m3u8`},{attempts:3,backoff:{type:"exponential",delay:30_000}});await audit(req as AuthRequest,"UPLOAD_COMPLETED","UPLOAD",id,{queued:!body.manifestStorageKey});return asset});
-app.get("/api/v1/admin/processing/jobs",{preHandler:requirePermission("catalog:write")},async()=>({waiting:await processingQueue.getWaitingCount(),active:await processingQueue.getActiveCount(),failed:await processingQueue.getFailedCount(),completed:await processingQueue.getCompletedCount()}));
+const androidUpdateSettings = async () => ({
+  latestVersionName: await getSetting("androidLatestVersionName", "1.0.0"),
+  latestVersionCode: await getSetting("androidLatestVersionCode", 1),
+  required: await getBooleanSetting("androidUpdateRequired", false),
+  message: await getSetting("androidUpdateMessage", "A new SecureStream Android app update is available."),
+  downloadUrl: await getSetting("androidDownloadUrl", ""),
+});
+const backupScheduleSettings = async () => ({
+  enabled: await getBooleanSetting("backupScheduleEnabled", false),
+  hour: Number(await getSetting("backupScheduleHour", 2)),
+  retentionCount: Number(await getSetting("backupRetentionCount", 7)),
+  uploadToDrive: await getBooleanSetting("backupScheduleDrive", false),
+});
+const alertTargetsConfigured = () =>
+  Boolean(
+    process.env.ALERT_WEBHOOK_URL ||
+      process.env.DISCORD_WEBHOOK_URL ||
+      (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID),
+  );
+async function sendPlatformAlert(title: string, body: string, metadata?: Record<string, unknown>) {
+  const tasks: Promise<unknown>[] = [];
+  const text = `${title}\n${body}`;
+  if (process.env.ALERT_WEBHOOK_URL)
+    tasks.push(
+      fetch(process.env.ALERT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title, body, metadata, createdAt: new Date().toISOString() }),
+      }).catch(() => undefined),
+    );
+  if (process.env.DISCORD_WEBHOOK_URL)
+    tasks.push(
+      fetch(process.env.DISCORD_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          username: "SecureStream",
+          content: text,
+          embeds: [
+            {
+              title,
+              description: body,
+              color: 8648645,
+              timestamp: new Date().toISOString(),
+              fields: metadata
+                ? Object.entries(metadata)
+                    .slice(0, 10)
+                    .map(([name, value]) => ({ name, value: String(value).slice(0, 1024), inline: true }))
+                : [],
+            },
+          ],
+        }),
+      }).catch(() => undefined),
+    );
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID)
+    tasks.push(
+      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: process.env.TELEGRAM_CHAT_ID, text }),
+      }).catch(() => undefined),
+    );
+  if (tasks.length) await Promise.all(tasks);
+}
+const backupScheduleState = { lastDate: "" };
+async function pruneBackups(retentionCount: number) {
+  if (retentionCount < 1) return;
+  const backups = await listBackups();
+  for (const backup of backups.slice(retentionCount))
+    await rm(path.join(storageRoot, "backups", backup.name), { force: true }).catch(() => undefined);
+}
+async function runScheduledBackupIfDue() {
+  const settings = await backupScheduleSettings();
+  if (!settings.enabled) return;
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10);
+  if (backupScheduleState.lastDate === date || now.getHours() < Math.max(0, Math.min(23, settings.hour))) return;
+  backupScheduleState.lastDate = date;
+  try {
+    const backup = await createPortableBackup();
+    await pruneBackups(settings.retentionCount);
+    if (settings.uploadToDrive)
+      await uploadBackupToDrive(backup.name).catch((error) =>
+        sendPlatformAlert(
+          "SecureStream backup Drive upload failed",
+          error instanceof Error ? error.message : "Google Drive upload failed",
+          { backup: backup.name },
+        ),
+      );
+    await sendPlatformAlert("SecureStream scheduled backup created", `${backup.name} is ready.`, {
+      sizeBytes: backup.sizeBytes,
+      mediaFiles: backup.mediaFiles,
+    });
+  } catch (error) {
+    await sendPlatformAlert(
+      "SecureStream scheduled backup failed",
+      error instanceof Error ? error.message : "Backup failed",
+    );
+  }
+}
+const isoDate = z
+  .preprocess((v) => (typeof v === "string" && v.length ? new Date(v) : v), z.date())
+  .nullable()
+  .optional();
+const catalogBody = z.object({
+  title: z.string().min(1).max(160),
+  synopsis: z.string().min(1).max(3000),
+  slug: z.string().min(1).max(100).optional(),
+  status: z.enum(["DRAFT", "PUBLISHED", "UNPUBLISHED", "ARCHIVED"]).default("DRAFT"),
+  featured: z.boolean().default(false),
+  posterUrl: z.string().url().optional(),
+  backdropUrl: z.string().url().optional(),
+  trailerUrl: z.string().url().optional(),
+  genres: z.array(z.string().min(1).max(40)).max(12).default([]),
+  tags: z.array(z.string().min(1).max(40)).max(24).default([]),
+  maturityRating: z.string().max(20).optional(),
+  availabilityStart: isoDate,
+  availabilityEnd: isoDate,
+});
+const seriesBody = catalogBody.omit({
+  featured: true,
+  trailerUrl: true,
+  maturityRating: true,
+  availabilityStart: true,
+  availabilityEnd: true,
+});
+const userAccessBody = z.object({
+  movieIds: z.array(z.string().uuid()).default([]),
+  collectionIds: z.array(z.string().uuid()).default([]),
+});
+const userWriteBody = z.object({
+  email: z.string().email().optional(),
+  displayName: z.string().min(2).max(80).optional(),
+  password: z.string().min(12).max(128).optional(),
+  role: z.enum(["SUPER_ADMIN", "ADMIN", "EDITOR", "VIEWER"]).optional(),
+  status: z.enum(["ACTIVE", "SUSPENDED", "DISABLED"]).optional(),
+  accessRestricted: z.boolean().optional(),
+  defaultCollectionId: z.string().uuid().nullable().optional(),
+  access: userAccessBody.optional(),
+});
 
-app.get("/api/v1/catalog",{preHandler:authenticate},async(req)=>{const auth=(req as AuthRequest).auth;const [scope,userDefault]=await Promise.all([userAccessScope(auth.sub),prisma.user.findUnique({where:{id:auth.sub},select:{defaultCollectionId:true}})]);const defaultCollectionId=userDefault?.defaultCollectionId??null;const [collections,movies]=await Promise.all([prisma.collection.findMany({where:{published:true,...(scope?{id:{in:[...scope.collectionIds]}}:{})},orderBy:[{parentId:"asc"},{sortOrder:"asc"}],include:{parent:true,items:{orderBy:{sortOrder:"asc"},include:{movie:{include:{assets:true}},series:true}}}}),prisma.movie.findMany({where:{status:"PUBLISHED",deletedAt:null,...(scope?{id:{in:[...scope.movieIds]}}:{})},include:{assets:true},orderBy:[{featured:"desc"},{updatedAt:"desc"}],take:50})]);await ensureMovieDurations([...(movies as MovieWithAssets[]),...(collections.flatMap(collection=>collection.items.map(item=>item.movie).filter(Boolean)) as MovieWithAssets[])]);const collectionRails=collections.map(collection=>({id:collection.id,name:collection.parent?`${collection.parent.name} / ${collection.name}`:collection.name,slug:collection.slug,parentId:collection.parentId,parentName:collection.parent?.name??null,items:collection.items.flatMap<CatalogCard>(item=>{if(item.movie&&(!item.movie.deletedAt)&&(!scope||scope.movieIds.has(item.movie.id))&&item.movie.status==="PUBLISHED"&&isCurrentlyAvailable(item.movie)&&movieHasReadyAsset(item.movie))return [toMovieCard(item.movie)];if(item.series&&item.series.status==="PUBLISHED")return [toSeriesCard(item.series)];return []})})).filter(rail=>rail.items.length>0);const collectionMovieIds=new Set(collectionRails.flatMap(rail=>rail.items.filter(item=>item.kind==="MOVIE").map(item=>item.id)));const movieItems=movies.filter(movie=>isCurrentlyAvailable(movie)&&movieHasReadyAsset(movie)&&!collectionMovieIds.has(movie.id)).map(toMovieCard);return {defaultCollectionId,rails:[...collectionRails,...(movieItems.length?[{id:"default-videos",name:"Videos",slug:"videos",parentId:null,parentName:null,items:movieItems}]:[])]}});
-app.get("/api/v1/search",{preHandler:authenticate},async(req)=>{const auth=(req as AuthRequest).auth;const scope=await userAccessScope(auth.sub);const q=z.object({q:z.string().min(2).max(100),genre:z.string().optional()}).parse(req.query);const [movies,collections]=await Promise.all([prisma.movie.findMany({where:{status:"PUBLISHED",deletedAt:null,...(scope?{id:{in:[...scope.movieIds]}}:{}),genres:q.genre?{has:q.genre}:undefined,OR:[{title:{contains:q.q,mode:"insensitive"}},{synopsis:{contains:q.q,mode:"insensitive"}},{tags:{has:q.q}}]},include:{assets:true},take:30}),prisma.collection.findMany({where:{published:true,...(scope?{id:{in:[...scope.collectionIds]}}:{}),OR:[{name:{contains:q.q,mode:"insensitive"}},{slug:{contains:q.q,mode:"insensitive"}}]},include:{items:{include:{movie:{include:{assets:true}}}}},take:10})]);const folderMovies=collections.flatMap(collection=>collection.items.flatMap(item=>item.movie&&!item.movie.deletedAt?[item.movie]:[]));const allMovies=[...movies,...folderMovies].filter((movie,index,self)=>self.findIndex(item=>item.id===movie.id)===index);await ensureMovieDurations(allMovies as MovieWithAssets[]);return allMovies.filter(movie=>(!scope||scope.movieIds.has(movie.id))&&movie.status==="PUBLISHED"&&!movie.deletedAt&&isCurrentlyAvailable(movie)&&movieHasReadyAsset(movie)).map(toMovieCard)});
-app.post("/api/v1/offline/downloads",{preHandler:authenticate,config:{rateLimit:{max:30,timeWindow:"1 minute"}}},async(req,reply)=>{const auth=(req as AuthRequest).auth;const body=z.object({videoId:z.string().uuid(),deviceId:z.string().min(8)}).parse(req.body);const user=await prisma.user.findUniqueOrThrow({where:{id:auth.sub}});if(user.status!=="ACTIVE"||user.deletedAt)return sendError(reply,req.id,403,"ACCOUNT_BLOCKED","Offline downloads unavailable");const asset=await prisma.videoAsset.findFirst({where:{state:"READY",OR:[{id:body.videoId},{movieId:body.videoId},{episodeId:body.videoId}]},include:{movie:true,episode:true}});if(!asset||!asset.manifestStorageKey)return sendError(reply,req.id,404,"VIDEO_UNAVAILABLE","Video is unavailable for offline download");if(asset.movie&&!(await canAccessMovie(user.id,asset.movie.id)))return sendError(reply,req.id,403,"TITLE_FORBIDDEN","This user is not allowed to watch this video");if(asset.movie&&(asset.movie.status!=="PUBLISHED"||asset.movie.deletedAt||!isCurrentlyAvailable(asset.movie)))return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This title is unavailable");if(asset.episode&&asset.episode.status!=="PUBLISHED")return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This episode is unavailable");const filePath=storagePathFor(asset.manifestStorageKey);if(!filePath)return sendError(reply,req.id,400,"DOWNLOAD_INVALID","Download path is invalid");let bytesExpected=0;try{bytesExpected=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"DOWNLOAD_NOT_FOUND","Offline file is unavailable")};const expiresAt=new Date(Date.now()+offlineDownloadTtlSeconds*1000);const token=await signOfflineDownload({sub:user.id,videoId:asset.id,deviceId:body.deviceId,expiresInSeconds:offlineDownloadTtlSeconds});return {videoAssetId:asset.id,downloadUrl:absoluteApiUrl(req,`/api/v1/media/${asset.id}/download?dt=${token}`),bytesExpected,headers:{},expiresAt:expiresAt.toISOString(),storage:"APP_PRIVATE_ONLY"}});
-app.post("/api/v1/playback/sessions",{preHandler:authenticate,config:{rateLimit:{max:20,timeWindow:"1 minute"}}},async(req,reply)=>{const auth=(req as AuthRequest).auth;const body=z.object({videoId:z.string().uuid(),deviceId:z.string().min(8),riskSignals:z.array(z.string()).default([])}).parse(req.body);const user=await prisma.user.findUniqueOrThrow({where:{id:auth.sub}});if(user.status!=="ACTIVE"||user.deletedAt)return sendError(reply,req.id,403,"ACCOUNT_BLOCKED","Playback unavailable");const asset=await prisma.videoAsset.findFirst({where:{state:"READY",OR:[{id:body.videoId},{movieId:body.videoId},{episodeId:body.videoId}]},include:{movie:true,episode:true}});if(!asset||!asset.manifestStorageKey)return sendError(reply,req.id,404,"VIDEO_UNAVAILABLE","Video is unavailable");if(asset.movie&&!(await canAccessMovie(user.id,asset.movie.id)))return sendError(reply,req.id,403,"TITLE_FORBIDDEN","This user is not allowed to watch this video");if(asset.movie&&(asset.movie.status!=="PUBLISHED"||asset.movie.deletedAt||!isCurrentlyAvailable(asset.movie)))return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This title is unavailable");if(asset.episode&&asset.episode.status!=="PUBLISHED")return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This episode is unavailable");if(config.DRM_PROVIDER==="widevine"&&(!config.WIDEVINE_LICENSE_URL||!asset.drmKeyId))return sendError(reply,req.id,503,"DRM_UNAVAILABLE","Protected playback is not configured for this asset");await prisma.playbackSession.updateMany({where:{userId:user.id,deviceId:body.deviceId,revokedAt:null},data:{revokedAt:new Date()}});const active=await prisma.playbackSession.count({where:{userId:user.id,revokedAt:null,expiresAt:{gt:new Date()}}});if(active>=config.MAX_CONCURRENT_STREAMS)return sendError(reply,req.id,409,"STREAM_LIMIT","Concurrent stream limit reached");const sid=randomUUID(),expiresAt=new Date(Date.now()+config.PLAYBACK_SESSION_TTL_SECONDS*1000);const token=await signPlayback({sub:user.id,sid,videoId:asset.id,deviceId:body.deviceId});await prisma.playbackSession.create({data:{id:sid,userId:user.id,videoAssetId:asset.id,deviceId:body.deviceId,expiresAt,riskSignals:body.riskSignals}});await prisma.watchHistory.create({data:{userId:user.id,videoAssetId:asset.id}});return {sessionId:sid,manifestUrl:absoluteApiUrl(req,`/api/v1/media/${asset.id}/manifest?pt=${token}`),headers:{"X-Playback-Session":sid},licenseUrl:config.DRM_PROVIDER==="widevine"?config.WIDEVINE_LICENSE_URL:undefined,videoAssetId:asset.id,watermark:{text:`${user.id.slice(0,4)}..${sid.slice(-4)}`,opacity:.22,moveEverySeconds:18},expiresAt:expiresAt.toISOString()}});
-app.post("/api/v1/playback/progress",{preHandler:authenticate},async(req,reply)=>{const auth=(req as AuthRequest).auth;const body=z.object({videoAssetId:z.string().uuid(),positionSeconds:z.number().int().min(0),completed:z.boolean().default(false)}).parse(req.body);const asset=await prisma.videoAsset.findFirst({where:{OR:[{id:body.videoAssetId},{movieId:body.videoAssetId},{episodeId:body.videoAssetId}]}});if(!asset)return sendError(reply,req.id,404,"VIDEO_UNAVAILABLE","Video is unavailable");return prisma.watchProgress.upsert({where:{userId_videoAssetId:{userId:auth.sub,videoAssetId:asset.id}},create:{userId:auth.sub,videoAssetId:asset.id,positionSeconds:body.positionSeconds,completed:body.completed},update:{positionSeconds:body.positionSeconds,completed:body.completed,version:{increment:1}}})});
-app.get("/api/v1/playback/progress",{preHandler:authenticate},async(req)=>prisma.watchProgress.findMany({where:{userId:(req as AuthRequest).auth.sub},orderBy:{updatedAt:"desc"},take:100}));
-app.get("/api/v1/history",{preHandler:authenticate},async(req)=>prisma.watchHistory.findMany({where:{userId:(req as AuthRequest).auth.sub,removedAt:null},include:{videoAsset:{include:{movie:true,episode:true}}},orderBy:{watchedAt:"desc"},take:100}));
-app.delete("/api/v1/history/:id",{preHandler:authenticate},async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;await prisma.watchHistory.updateMany({where:{id,userId:(req as AuthRequest).auth.sub},data:{removedAt:new Date()}});return reply.code(204).send()});
-app.post("/api/v1/my-list",{preHandler:authenticate},async(req,reply)=>{const body=z.object({catalogId:z.string().uuid(),kind:z.enum(["MOVIE","SERIES"])}).parse(req.body);const userId=(req as AuthRequest).auth.sub;const item=await prisma.myListItem.upsert({where:{userId_catalogId:{userId,catalogId:body.catalogId}},create:{userId,...body},update:{kind:body.kind}});return reply.code(201).send(item)});
-app.get("/api/v1/my-list",{preHandler:authenticate},async(req)=>prisma.myListItem.findMany({where:{userId:(req as AuthRequest).auth.sub},orderBy:{createdAt:"desc"}}));
-app.delete("/api/v1/my-list/:catalogId",{preHandler:authenticate},async(req,reply)=>{const catalogId=z.object({catalogId:z.string().uuid()}).parse(req.params).catalogId;await prisma.myListItem.deleteMany({where:{userId:(req as AuthRequest).auth.sub,catalogId}});return reply.code(204).send()});
-app.get("/api/v1/media/:id/manifest",async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const query=z.object({pt:z.string().min(20).optional()}).parse(req.query);if(query.pt){try{const payload=await verifyPlayback(query.pt);if(payload.videoId!==id||payload.scope!=="playback")return sendError(reply,req.id,403,"FORBIDDEN","Playback token is not valid for this video");await requireActiveSubject(payload.sub,req,reply);if(reply.sent)return}catch{return sendError(reply,req.id,401,"TOKEN_INVALID","Playback session expired")}}else{await authenticate(req,reply);if(reply.sent)return}const asset=await prisma.videoAsset.findUnique({where:{id},include:{movie:true,episode:true}});if(!asset?.manifestStorageKey)return sendError(reply,req.id,404,"MANIFEST_NOT_FOUND","Manifest is unavailable");if(asset.movie&&(asset.movie.status!=="PUBLISHED"||asset.movie.deletedAt||!isCurrentlyAvailable(asset.movie)))return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This title is unavailable");if(asset.episode&&asset.episode.status!=="PUBLISHED")return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This episode is unavailable");const filePath=storagePathFor(asset.manifestStorageKey);if(!filePath)return sendError(reply,req.id,400,"MANIFEST_INVALID","Manifest path is invalid");let size=0;try{size=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"MANIFEST_NOT_FOUND","Manifest file is unavailable")};const range=req.headers.range;reply.header("accept-ranges","bytes");reply.header("cache-control","private, max-age=60");reply.header("content-type",contentTypeFor(asset.manifestStorageKey));if(range){const match=range.match(/bytes=(\d*)-(\d*)/);const startRaw=match?.[1],endRaw=match?.[2];const start=startRaw?Number(startRaw):0;const end=endRaw?Math.min(Number(endRaw),size-1):size-1;if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=size)return reply.code(416).header("content-range",`bytes */${size}`).send();reply.code(206).header("content-range",`bytes ${start}-${end}/${size}`).header("content-length",String(end-start+1));return reply.send(createReadStream(filePath,{start,end}))}reply.header("content-length",String(size));return reply.send(createReadStream(filePath))});
-app.get("/api/v1/media/:id/download",async(req,reply)=>{const id=z.object({id:z.string().uuid()}).parse(req.params).id;const query=z.object({dt:z.string().min(20)}).parse(req.query);try{const payload=await verifyPlayback(query.dt);if(payload.videoId!==id||payload.scope!=="offline-download")return sendError(reply,req.id,403,"FORBIDDEN","Download token is not valid for this video");await requireActiveSubject(payload.sub,req,reply);if(reply.sent)return}catch{return sendError(reply,req.id,401,"TOKEN_INVALID","Offline download link expired")};const asset=await prisma.videoAsset.findUnique({where:{id},include:{movie:true,episode:true}});const key=asset?.manifestStorageKey;if(!asset||!key)return sendError(reply,req.id,404,"DOWNLOAD_NOT_FOUND","Offline file is unavailable");if(asset.movie&&(asset.movie.status!=="PUBLISHED"||asset.movie.deletedAt||!isCurrentlyAvailable(asset.movie)))return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This title is unavailable");if(asset.episode&&asset.episode.status!=="PUBLISHED")return sendError(reply,req.id,403,"TITLE_UNAVAILABLE","This episode is unavailable");const filePath=storagePathFor(key);if(!filePath)return sendError(reply,req.id,400,"DOWNLOAD_INVALID","Download path is invalid");let size=0;try{size=(await stat(filePath)).size}catch{return sendError(reply,req.id,404,"DOWNLOAD_NOT_FOUND","Offline file is unavailable")};const range=req.headers.range;const extension=path.extname(key)||".mp4";const filename=`${slugify(asset.movie?.title??asset.episode?.title??"securestream-video")}${extension}`;reply.header("accept-ranges","bytes");reply.header("cache-control","private, no-store");reply.header("content-disposition",`inline; filename="${filename}"`);reply.header("content-type",contentTypeFor(key));if(range){const match=range.match(/bytes=(\d*)-(\d*)/);const startRaw=match?.[1],endRaw=match?.[2];const start=startRaw?Number(startRaw):0;const end=endRaw?Math.min(Number(endRaw),size-1):size-1;if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<start||start>=size)return reply.code(416).header("content-range",`bytes */${size}`).send();reply.code(206).header("content-range",`bytes ${start}-${end}/${size}`).header("content-length",String(end-start+1));return reply.send(createReadStream(filePath,{start,end}))}reply.header("content-length",String(size));return reply.send(createReadStream(filePath))});
+app.setErrorHandler((error, req, reply) => {
+  const normalized = error as { statusCode?: number; message?: string; name?: string };
+  const validation = normalized.name === "ZodError";
+  const status = validation ? 400 : (normalized.statusCode ?? 500);
+  req.log.error({ err: error }, "request failed");
+  reply.status(status).send({
+    error: {
+      code: validation ? "VALIDATION_ERROR" : status === 500 ? "INTERNAL_ERROR" : "REQUEST_ERROR",
+      message: status === 500 ? "Unexpected server error" : (normalized.message ?? "Request failed"),
+      requestId: req.id,
+    },
+  });
+});
 
-setInterval(()=>void runScheduledBackupIfDue().catch(error=>app.log.error({err:error},"scheduled backup failed")),5*60_000);
-void runScheduledBackupIfDue().catch(error=>app.log.error({err:error},"scheduled backup failed"));
+async function authenticate(req: FastifyRequest, reply: FastifyReply) {
+  const bearer = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  if (bearer?.startsWith(apiTokenPrefix)) {
+    const record = await prisma.apiToken.findUnique({
+      where: { tokenHash: hashToken(bearer) },
+      include: { user: true },
+    });
+    if (
+      !record ||
+      record.revokedAt ||
+      record.user.status !== "ACTIVE" ||
+      record.user.deletedAt ||
+      !isAdminRole(record.user.role)
+    )
+      return sendError(reply, req.id, 401, "TOKEN_INVALID", "API token is invalid or revoked");
+    await prisma.apiToken.update({ where: { id: record.id }, data: { lastUsedAt: new Date() } }).catch(() => undefined);
+    (req as AuthRequest).auth = { sub: record.userId, role: record.user.role };
+    return;
+  }
+  const cookieToken = req.cookies[config.ADMIN_COOKIE_NAME];
+  const raw = bearer ?? cookieToken;
+  if (!raw) return sendError(reply, req.id, 401, "UNAUTHENTICATED", "Authentication required");
+  try {
+    const payload = await verifyAccess(raw);
+    if (!payload.sub || typeof payload.role !== "string") throw new Error("invalid claims");
+    const user = await prisma.user.findUnique({
+      where: { id: String(payload.sub) },
+      select: { id: true, role: true, status: true, deletedAt: true },
+    });
+    if (!user || user.status !== "ACTIVE" || user.deletedAt)
+      return sendError(reply, req.id, 401, "ACCOUNT_INACTIVE", "Account no longer exists or is disabled");
+    const maintenance = await maintenanceSettings();
+    if (maintenance.enabled && !isAdminRole(user.role))
+      return sendAccountStatus(reply, req.id, 503, "MAINTENANCE_MODE", "MAINTENANCE", maintenance.message);
+    (req as AuthRequest).auth = { sub: user.id, role: user.role };
+  } catch {
+    return sendError(reply, req.id, 401, "TOKEN_INVALID", "Session expired");
+  }
+}
+async function requireActiveSubject(sub: unknown, req: FastifyRequest, reply: FastifyReply) {
+  if (typeof sub !== "string") return sendError(reply, req.id, 401, "TOKEN_INVALID", "Session expired");
+  const user = await prisma.user.findUnique({ where: { id: sub }, select: { status: true, deletedAt: true } });
+  if (!user || user.status !== "ACTIVE" || user.deletedAt)
+    return sendError(reply, req.id, 401, "ACCOUNT_INACTIVE", "Account no longer exists or is disabled");
+}
+const requirePermission = (permission: string) => async (req: FastifyRequest, reply: FastifyReply) => {
+  await authenticate(req, reply);
+  if (reply.sent) return;
+  if (!hasPermission((req as AuthRequest).auth.role, permission))
+    return sendError(reply, req.id, 403, "FORBIDDEN", "Insufficient permission");
+};
+async function requireCsrf(req: FastifyRequest, reply: FastifyReply) {
+  if (req.headers.authorization?.match(/^Bearer (.+)$/)) return;
+  const header = req.headers["x-csrf-token"];
+  const cookieValue = req.cookies[config.ADMIN_CSRF_COOKIE_NAME];
+  if (!header || header !== cookieValue) return sendError(reply, req.id, 403, "CSRF_INVALID", "CSRF validation failed");
+}
+async function audit(
+  req: AuthRequest,
+  action: string,
+  targetType: string,
+  targetId?: string,
+  metadata?: Prisma.InputJsonValue,
+) {
+  await prisma.adminAuditLog.create({
+    data: { actorUserId: req.auth.sub, action, targetType, targetId, requestId: req.id, ipHash: ipHash(req), metadata },
+  });
+}
+async function userAccessScope(userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { accessRestricted: true } });
+  if (!user?.accessRestricted) return null;
+  const [movies, collections] = await Promise.all([
+    prisma.userMovieAccess.findMany({ where: { userId }, select: { movieId: true } }),
+    prisma.userCollectionAccess.findMany({ where: { userId }, select: { collectionId: true } }),
+  ]);
+  const ids = new Set(movies.map((item) => item.movieId));
+  if (collections.length) {
+    const items = await prisma.collectionItem.findMany({
+      where: { collectionId: { in: collections.map((item) => item.collectionId) }, movieId: { not: null } },
+      select: { movieId: true },
+    });
+    items.forEach((item) => {
+      if (item.movieId) ids.add(item.movieId);
+    });
+  }
+  return { movieIds: ids, collectionIds: new Set(collections.map((item) => item.collectionId)) };
+}
+const canAccessMovie = async (userId: string, movieId: string) => {
+  const scope = await userAccessScope(userId);
+  return !scope || scope.movieIds.has(movieId);
+};
+async function replaceUserAccess(
+  userId: string,
+  access: { movieIds: string[]; collectionIds: string[] },
+  defaultCollectionId?: string | null,
+) {
+  const collectionIds = defaultCollectionId
+    ? [...new Set([...access.collectionIds, defaultCollectionId])]
+    : access.collectionIds;
+  await prisma.$transaction(async (tx) => {
+    await tx.userMovieAccess.deleteMany({ where: { userId } });
+    await tx.userCollectionAccess.deleteMany({ where: { userId } });
+    if (access.movieIds.length)
+      await tx.userMovieAccess.createMany({
+        data: [...new Set(access.movieIds)].map((movieId) => ({ userId, movieId })),
+        skipDuplicates: true,
+      });
+    if (collectionIds.length)
+      await tx.userCollectionAccess.createMany({
+        data: [...new Set(collectionIds)].map((collectionId) => ({ userId, collectionId })),
+        skipDuplicates: true,
+      });
+  });
+}
+const supportConversationFor = (userId: string) =>
+  prisma.supportConversation.upsert({ where: { userId }, create: { userId }, update: {} });
+async function runTrimEditorJob(job: EditorJob, inputPath: string, synopsis: string) {
+  try {
+    rememberEditorJob(job, "Preparing editor workspace", 2, "RUNNING");
+    const outputKey = `edits/${job.id}.mp4`;
+    const outputPath = path.join(storageRoot, outputKey);
+    await mkdir(path.dirname(outputPath), { recursive: true });
+    await trimVideo(inputPath, outputPath, job.startSeconds, job.endSeconds, (progress) =>
+      rememberEditorJob(job, "Trimming video", progress, "RUNNING"),
+    );
+    rememberEditorJob(job, "Saving edited draft", 99, "RUNNING");
+    const fileStat = await stat(outputPath);
+    const durationSeconds = Math.round((await probeDurationSeconds(outputPath)) ?? job.endSeconds - job.startSeconds);
+    const movie = await prisma.movie.create({
+      data: {
+        title: job.title,
+        synopsis: `${synopsis}\n\nEdited clip: ${Math.round(job.startSeconds)}s to ${Math.round(job.endSeconds)}s.`,
+        slug: `${slugify(job.title)}-${Date.now()}`,
+        status: "DRAFT",
+        assets: {
+          create: {
+            state: "READY",
+            sourceStorageKey: outputKey,
+            manifestStorageKey: outputKey,
+            durationSeconds: durationSeconds || undefined,
+            uploads: {
+              create: {
+                storageKey: outputKey,
+                bytesExpected: fileStat.size,
+                bytesReceived: fileStat.size,
+                status: "COMPLETED",
+              },
+            },
+          },
+        },
+      },
+      include: { assets: true },
+    });
+    job.resultMovieId = movie.id;
+    job.resultAssetId = movie.assets[0]?.id;
+    rememberEditorJob(job, "Edited draft ready", 100, "COMPLETED");
+  } catch (error) {
+    job.error = error instanceof Error ? error.message : "Editor job failed";
+    rememberEditorJob(job, "Failed", 100, "FAILED");
+  }
+}
 
-await app.listen({host:"0.0.0.0",port:4000});
+app.get("/health", async () => ({ status: "ok" }));
+app.get("/ready", async (_req, reply) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return { status: "ready" };
+  } catch {
+    return reply.code(503).send({ status: "not-ready" });
+  }
+});
+
+app.post(
+  "/api/v1/auth/register",
+  { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
+  async (req, reply) => {
+    if (!config.REGISTRATION_ENABLED)
+      return sendError(reply, req.id, 403, "REGISTRATION_DISABLED", "Registration is currently unavailable");
+    const body = z
+      .object({
+        email: z.string().email(),
+        password: z.string().min(12).max(128),
+        displayName: z.string().min(2).max(80),
+      })
+      .parse(req.body);
+    const email = body.email.toLowerCase();
+    if (await prisma.user.findUnique({ where: { email } }))
+      return sendError(reply, req.id, 409, "ACCOUNT_EXISTS", "An account already exists");
+    const user = await prisma.user.create({
+      data: {
+        email,
+        displayName: body.displayName,
+        passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
+        role: "VIEWER",
+      },
+    });
+    const token = opaqueToken();
+    await prisma.emailVerificationToken.create({
+      data: { userId: user.id, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) },
+    });
+    await prisma.securityEvent.create({ data: { userId: user.id, kind: "ACCOUNT_REGISTERED", severity: "INFO" } });
+    return reply
+      .code(201)
+      .send({ user: publicUser(user), verificationToken: config.NODE_ENV === "development" ? token : undefined });
+  },
+);
+
+app.post("/api/v1/auth/login", { config: { rateLimit: { max: 8, timeWindow: "15 minutes" } } }, async (req, reply) => {
+  const body = z
+    .object({ email: z.string().email(), password: z.string(), deviceId: z.string().min(8) })
+    .parse(req.body);
+  const user = await verifyPasswordAndTrack(prisma, body.email, body.password);
+  if (!user) {
+    const existing = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() }, select: { id: true } });
+    await prisma.securityEvent.create({
+      data: { userId: existing?.id, kind: "LOGIN_FAILED", severity: "MEDIUM", metadata: { ipHash: ipHash(req) } },
+    });
+    return existing
+      ? sendError(reply, req.id, 401, "INVALID_CREDENTIALS", "Email or password is incorrect")
+      : sendAccountStatus(
+          reply,
+          req.id,
+          404,
+          "ACCOUNT_NOT_FOUND",
+          "DELETED",
+          "This account no longer exists. Please contact the administrator.",
+        );
+  }
+  if (user.deletedAt)
+    return sendAccountStatus(
+      reply,
+      req.id,
+      403,
+      "ACCOUNT_INACTIVE",
+      "DELETED",
+      user.deletedReason ?? "This account was deleted by the administrator.",
+    );
+  if (user.status !== "ACTIVE") {
+    await prisma.securityEvent.create({
+      data: {
+        userId: user.id,
+        kind: "LOGIN_BLOCKED",
+        severity: "MEDIUM",
+        metadata: { ipHash: ipHash(req), status: user.status },
+      },
+    });
+    const message =
+      user.status === "SUSPENDED"
+        ? "Your account is suspended. Please contact the administrator."
+        : "Your account is disabled. Please contact the administrator.";
+    return sendAccountStatus(reply, req.id, 403, "ACCOUNT_INACTIVE", user.status, message);
+  }
+  const maintenance = await maintenanceSettings();
+  if (maintenance.enabled && !isAdminRole(user.role))
+    return sendAccountStatus(reply, req.id, 503, "MAINTENANCE_MODE", "MAINTENANCE", maintenance.message);
+  const tokens = await issueSession(prisma, user, sessionContext(req, body.deviceId));
+  await prisma.securityEvent.create({ data: { userId: user.id, kind: "LOGIN_SUCCEEDED", severity: "INFO" } });
+  return { ...tokens, user: publicUser(user) };
+});
+
+app.post("/api/v1/auth/refresh", async (req, reply) => {
+  const body = z.object({ refreshToken: z.string().min(32), deviceId: z.string().min(8) }).parse(req.body);
+  const result = await rotateSession(prisma, body.refreshToken, sessionContext(req, body.deviceId));
+  if (result.kind !== "ok")
+    return sendError(
+      reply,
+      req.id,
+      401,
+      result.kind === "reuse" ? "TOKEN_REUSE" : "REFRESH_INVALID",
+      "Session is no longer valid",
+    );
+  return result;
+});
+app.post("/api/v1/auth/logout", async (req, reply) => {
+  const body = z.object({ refreshToken: z.string().min(32) }).parse(req.body);
+  await prisma.refreshSession.updateMany({
+    where: { tokenHash: hashToken(body.refreshToken), revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  return reply.code(204).send();
+});
+
+app.post(
+  "/api/v1/auth/forgot-password",
+  { config: { rateLimit: { max: 3, timeWindow: "15 minutes" } } },
+  async (req) => {
+    const body = z.object({ email: z.string().email() }).parse(req.body);
+    const user = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
+    let token: string | undefined;
+    if (user && user.status === "ACTIVE") {
+      token = opaqueToken();
+      await prisma.passwordResetToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: hashToken(token),
+          expiresAt: new Date(Date.now() + config.EMAIL_TOKEN_TTL_MINUTES * 60_000),
+        },
+      });
+    }
+    return {
+      message: "If the account exists, reset instructions will be sent.",
+      resetToken: config.NODE_ENV === "development" ? token : undefined,
+    };
+  },
+);
+app.post("/api/v1/auth/reset-password", async (req, reply) => {
+  const body = z.object({ token: z.string().min(32), password: z.string().min(12).max(128) }).parse(req.body);
+  const record = await prisma.passwordResetToken.findUnique({ where: { tokenHash: hashToken(body.token) } });
+  if (!record || record.usedAt || record.expiresAt <= new Date())
+    return sendError(reply, req.id, 400, "RESET_INVALID", "Reset token is invalid or expired");
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: record.userId },
+      data: {
+        passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
+        failedLoginCount: 0,
+        lockedUntil: null,
+      },
+    }),
+    prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
+    prisma.refreshSession.updateMany({
+      where: { userId: record.userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+  ]);
+  return { message: "Password updated" };
+});
+app.post("/api/v1/auth/verify-email", async (req, reply) => {
+  const body = z.object({ token: z.string().min(32) }).parse(req.body);
+  const record = await prisma.emailVerificationToken.findUnique({ where: { tokenHash: hashToken(body.token) } });
+  if (!record || record.usedAt || record.expiresAt <= new Date())
+    return sendError(reply, req.id, 400, "VERIFICATION_INVALID", "Verification token is invalid or expired");
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: record.userId }, data: { emailVerifiedAt: new Date() } }),
+    prisma.emailVerificationToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
+  ]);
+  return { message: "Email verified" };
+});
+
+app.get("/api/v1/account/me", { preHandler: authenticate }, async (req) =>
+  publicUser(await prisma.user.findUniqueOrThrow({ where: { id: (req as AuthRequest).auth.sub } })),
+);
+app.patch("/api/v1/account/me", { preHandler: authenticate }, async (req) => {
+  const auth = (req as AuthRequest).auth;
+  const body = z
+    .object({ displayName: z.string().min(2).max(80).optional(), password: z.string().min(12).max(128).optional() })
+    .parse(req.body);
+  const user = await prisma.user.update({
+    where: { id: auth.sub },
+    data: {
+      displayName: body.displayName,
+      passwordHash: body.password ? await argon2.hash(body.password, { type: argon2.argon2id }) : undefined,
+    },
+  });
+  return publicUser(user);
+});
+app.get("/api/v1/account/dashboard", { preHandler: authenticate }, async (req) => {
+  const userId = (req as AuthRequest).auth.sub;
+  const [user, unreadNotifications, conversation] = await Promise.all([
+    prisma.user.findUniqueOrThrow({ where: { id: userId } }),
+    prisma.userNotification.count({ where: { userId, readAt: null } }),
+    supportConversationFor(userId),
+  ]);
+  const unreadMessages = await prisma.supportMessage.count({
+    where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
+  });
+  return { user: publicUser(user), unreadNotifications, unreadMessages };
+});
+app.get("/api/v1/account/sessions", { preHandler: authenticate }, async (req) =>
+  prisma.refreshSession.findMany({
+    where: { userId: (req as AuthRequest).auth.sub, revokedAt: null, expiresAt: { gt: new Date() } },
+    select: { id: true, deviceId: true, userAgent: true, createdAt: true, lastUsedAt: true, expiresAt: true },
+    orderBy: { lastUsedAt: "desc" },
+  }),
+);
+app.delete("/api/v1/account/sessions/:id", { preHandler: authenticate }, async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  await prisma.refreshSession.updateMany({
+    where: { id, userId: (req as AuthRequest).auth.sub },
+    data: { revokedAt: new Date() },
+  });
+  return reply.code(204).send();
+});
+app.delete("/api/v1/account/sessions", { preHandler: authenticate }, async (req, reply) => {
+  await prisma.refreshSession.updateMany({
+    where: { userId: (req as AuthRequest).auth.sub, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  return reply.code(204).send();
+});
+app.get("/api/v1/messages", { preHandler: authenticate }, async (req) => {
+  const userId = (req as AuthRequest).auth.sub;
+  const conversation = await supportConversationFor(userId);
+  const messages = await prisma.supportMessage.findMany({
+    where: { conversationId: conversation.id },
+    include: { sender: { select: { id: true, displayName: true, role: true } } },
+    orderBy: { createdAt: "asc" },
+    take: 100,
+  });
+  await prisma.supportMessage.updateMany({
+    where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
+    data: { readAt: new Date() },
+  });
+  return { conversationId: conversation.id, messages, items: messages };
+});
+app.post(
+  "/api/v1/messages",
+  { preHandler: authenticate, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+  async (req, reply) => {
+    const userId = (req as AuthRequest).auth.sub;
+    const body = z.object({ body: z.string().min(1).max(5000) }).parse(req.body);
+    const conversation = await supportConversationFor(userId);
+    const message = await prisma.supportMessage.create({
+      data: { conversationId: conversation.id, senderUserId: userId, body: body.body.trim() },
+      include: { sender: { select: { id: true, displayName: true, role: true } } },
+    });
+    await prisma.supportConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+    return reply.code(201).send(message);
+  },
+);
+app.get("/api/v1/notifications", { preHandler: authenticate }, async (req) =>
+  prisma.userNotification.findMany({
+    where: { userId: (req as AuthRequest).auth.sub },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  }),
+);
+app.patch("/api/v1/notifications/:id/read", { preHandler: authenticate }, async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const updated = await prisma.userNotification.updateMany({
+    where: { id, userId: (req as AuthRequest).auth.sub },
+    data: { readAt: new Date() },
+  });
+  if (!updated.count) return sendError(reply, req.id, 404, "NOTIFICATION_NOT_FOUND", "Notification not found");
+  return reply.code(204).send();
+});
+app.patch("/api/v1/notifications/read-all", { preHandler: authenticate }, async (req, reply) => {
+  await prisma.userNotification.updateMany({
+    where: { userId: (req as AuthRequest).auth.sub, readAt: null },
+    data: { readAt: new Date() },
+  });
+  return reply.code(204).send();
+});
+
+app.post(
+  "/api/v1/admin/auth/login",
+  { config: { rateLimit: { max: 6, timeWindow: "15 minutes" } } },
+  async (req, reply) => {
+    const body = z
+      .object({ email: z.string().email(), password: z.string(), deviceId: z.string().min(8) })
+      .parse(req.body);
+    const user = await verifyPasswordAndTrack(prisma, body.email, body.password);
+    if (!user || user.status !== "ACTIVE" || !isAdminRole(user.role))
+      return sendError(reply, req.id, 401, "INVALID_CREDENTIALS", "Email or password is incorrect");
+    const accessToken = await signAccess(user.id, user.role);
+    const csrf = opaqueToken();
+    reply.setCookie(config.ADMIN_COOKIE_NAME, accessToken, {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: adminCookieSameSite,
+      path: "/",
+      maxAge: config.ACCESS_TOKEN_TTL_SECONDS,
+    });
+    reply.setCookie(config.ADMIN_CSRF_COOKIE_NAME, csrf, {
+      httpOnly: false,
+      secure: config.NODE_ENV === "production",
+      sameSite: adminCookieSameSite,
+      path: "/",
+      maxAge: config.ACCESS_TOKEN_TTL_SECONDS,
+    });
+    await prisma.adminAuditLog.create({
+      data: {
+        actorUserId: user.id,
+        action: "ADMIN_LOGIN",
+        targetType: "SESSION",
+        requestId: req.id,
+        ipHash: ipHash(req),
+      },
+    });
+    return { accessToken, user: publicUser(user), csrfToken: csrf };
+  },
+);
+app.post("/api/v1/admin/auth/logout", { preHandler: [authenticate, requireCsrf] }, async (req, reply) => {
+  reply.clearCookie(config.ADMIN_COOKIE_NAME, { path: "/" });
+  reply.clearCookie(config.ADMIN_CSRF_COOKIE_NAME, { path: "/" });
+  await audit(req as AuthRequest, "ADMIN_LOGOUT", "SESSION");
+  return reply.code(204).send();
+});
+app.get("/api/v1/admin/auth/me", { preHandler: authenticate }, async (req, reply) => {
+  const auth = (req as AuthRequest).auth;
+  if (!isAdminRole(auth.role)) return sendError(reply, req.id, 403, "FORBIDDEN", "Administrator access required");
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: auth.sub } });
+  return { ...publicUser(user), accessToken: await signAccess(user.id, user.role) };
+});
+app.get("/api/v1/admin/api-tokens", { preHandler: requirePermission("users:manage") }, async (req) =>
+  prisma.apiToken.findMany({
+    where: { userId: (req as AuthRequest).auth.sub },
+    select: { id: true, name: true, createdAt: true, lastUsedAt: true, revokedAt: true },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  }),
+);
+app.post(
+  "/api/v1/admin/api-tokens",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const body = z.object({ name: z.string().min(2).max(80) }).parse(req.body);
+    const token = `${apiTokenPrefix}${opaqueToken()}${opaqueToken()}`;
+    const record = await prisma.apiToken.create({
+      data: { userId: (req as AuthRequest).auth.sub, name: body.name.trim(), tokenHash: hashToken(token) },
+    });
+    await audit(req as AuthRequest, "API_TOKEN_CREATED", "API_TOKEN", record.id, { name: record.name });
+    return reply.code(201).send({ id: record.id, name: record.name, createdAt: record.createdAt, token });
+  },
+);
+app.delete(
+  "/api/v1/admin/api-tokens/:id",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const updated = await prisma.apiToken.updateMany({
+      where: { id, userId: (req as AuthRequest).auth.sub, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    if (!updated.count) return sendError(reply, req.id, 404, "API_TOKEN_NOT_FOUND", "API token not found");
+    await audit(req as AuthRequest, "API_TOKEN_REVOKED", "API_TOKEN", id);
+    return reply.code(204).send();
+  },
+);
+app.get("/api/v1/admin/users", { preHandler: requirePermission("users:manage") }, async () =>
+  prisma.user.findMany({
+    where: { deletedAt: null },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      role: true,
+      status: true,
+      accessRestricted: true,
+      defaultCollectionId: true,
+      emailVerifiedAt: true,
+      createdAt: true,
+      movieAccess: { select: { movieId: true } },
+      collectionAccess: { select: { collectionId: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+  }),
+);
+app.post(
+  "/api/v1/admin/users",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const body = userWriteBody
+      .extend({
+        email: z.string().email(),
+        displayName: z.string().min(2).max(80),
+        password: z.string().min(12).max(128),
+      })
+      .parse(req.body);
+    const user = await prisma.user.create({
+      data: {
+        email: body.email.toLowerCase(),
+        displayName: body.displayName,
+        passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
+        role: body.role ?? "VIEWER",
+        status: body.status ?? "ACTIVE",
+        accessRestricted: body.accessRestricted ?? true,
+        defaultCollectionId: body.defaultCollectionId || undefined,
+        emailVerifiedAt: new Date(),
+      },
+    });
+    if (body.access)
+      await replaceUserAccess(user.id, body.access, body.accessRestricted === false ? null : body.defaultCollectionId);
+    await audit(req as AuthRequest, "USER_CREATED", "USER", user.id, {
+      email: user.email,
+      role: user.role,
+      defaultCollectionId: body.defaultCollectionId,
+    });
+    return reply.code(201).send(
+      await prisma.user.findUniqueOrThrow({
+        where: { id: user.id },
+        select: {
+          id: true,
+          email: true,
+          displayName: true,
+          role: true,
+          status: true,
+          accessRestricted: true,
+          defaultCollectionId: true,
+          emailVerifiedAt: true,
+          createdAt: true,
+          movieAccess: { select: { movieId: true } },
+          collectionAccess: { select: { collectionId: true } },
+        },
+      }),
+    );
+  },
+);
+app.patch("/api/v1/admin/users/:id", { preHandler: [requirePermission("users:manage"), requireCsrf] }, async (req) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const body = userWriteBody.parse(req.body);
+  const data: Prisma.UserUncheckedUpdateInput = {
+    email: body.email?.toLowerCase(),
+    displayName: body.displayName,
+    role: body.role,
+    status: body.status,
+    accessRestricted: body.accessRestricted,
+    defaultCollectionId: body.defaultCollectionId === undefined ? undefined : body.defaultCollectionId || null,
+    passwordHash: body.password ? await argon2.hash(body.password, { type: argon2.argon2id }) : undefined,
+  };
+  const user = await prisma.user.update({ where: { id }, data });
+  if (body.status && body.status !== "ACTIVE")
+    await prisma.refreshSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+  if (body.access)
+    await replaceUserAccess(id, body.access, body.accessRestricted === false ? null : body.defaultCollectionId);
+  await audit(req as AuthRequest, "USER_UPDATED", "USER", id, { fields: Object.keys(body) });
+  return prisma.user.findUniqueOrThrow({
+    where: { id },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      role: true,
+      status: true,
+      accessRestricted: true,
+      defaultCollectionId: true,
+      emailVerifiedAt: true,
+      createdAt: true,
+      movieAccess: { select: { movieId: true } },
+      collectionAccess: { select: { collectionId: true } },
+    },
+  });
+});
+app.patch(
+  "/api/v1/admin/users/:id/status",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z.object({ status: z.enum(["ACTIVE", "SUSPENDED", "DISABLED"]) }).parse(req.body);
+    const user = await prisma.user.update({ where: { id }, data: { status: body.status } });
+    if (body.status !== "ACTIVE")
+      await prisma.refreshSession.updateMany({
+        where: { userId: id, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+    await audit(req as AuthRequest, "USER_STATUS_CHANGED", "USER", id, { status: body.status });
+    return publicUser(user);
+  },
+);
+app.delete(
+  "/api/v1/admin/users/:id",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const auth = (req as AuthRequest).auth;
+    if (id === auth.sub)
+      return sendError(reply, req.id, 400, "USER_DELETE_SELF", "You cannot delete your own admin account");
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user || user.deletedAt) return sendError(reply, req.id, 404, "USER_NOT_FOUND", "User not found");
+    await prisma.$transaction(async (tx) => {
+      await tx.refreshSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+      await tx.playbackSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+      await tx.user.update({
+        where: { id },
+        data: { status: "DISABLED", deletedAt: new Date(), deletedReason: "Deleted by administrator" },
+      });
+    });
+    await audit(req as AuthRequest, "USER_SOFT_DELETED", "USER", id, { email: user.email });
+    return reply.code(204).send();
+  },
+);
+app.get("/api/v1/admin/conversations", { preHandler: requirePermission("users:manage") }, async (req) => {
+  const auth = (req as AuthRequest).auth;
+  const conversations = await prisma.supportConversation.findMany({
+    orderBy: { updatedAt: "desc" },
+    take: 100,
+    include: {
+      user: { select: { id: true, email: true, displayName: true, status: true } },
+      messages: {
+        orderBy: { createdAt: "asc" },
+        take: 50,
+        include: { sender: { select: { id: true, displayName: true, role: true } } },
+      },
+    },
+  });
+  return Promise.all(
+    conversations.map(async (conversation) => ({
+      ...conversation,
+      lastMessage: conversation.messages.at(-1) ?? null,
+      unreadCount: await prisma.supportMessage.count({
+        where: { conversationId: conversation.id, senderUserId: { not: auth.sub }, readAt: null },
+      }),
+    })),
+  );
+});
+app.post(
+  "/api/v1/admin/conversations",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const body = z.object({ userId: z.string().uuid(), body: z.string().min(1).max(5000) }).parse(req.body);
+    const user = await prisma.user.findUnique({ where: { id: body.userId } });
+    if (!user) return sendError(reply, req.id, 404, "USER_NOT_FOUND", "User not found");
+    const conversation = await supportConversationFor(user.id);
+    const message = await prisma.supportMessage.create({
+      data: { conversationId: conversation.id, senderUserId: auth.sub, body: body.body.trim() },
+      include: { sender: { select: { id: true, displayName: true, role: true } } },
+    });
+    await prisma.supportConversation.update({ where: { id: conversation.id }, data: { updatedAt: new Date() } });
+    await audit(req as AuthRequest, "SUPPORT_CONVERSATION_STARTED", "CONVERSATION", conversation.id, {
+      userId: user.id,
+    });
+    return reply.code(201).send({ conversation, message });
+  },
+);
+app.patch(
+  "/api/v1/admin/conversations/read-all",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    await prisma.supportMessage.updateMany({
+      where: { senderUserId: { not: auth.sub }, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return reply.code(204).send();
+  },
+);
+app.get(
+  "/api/v1/admin/conversations/:id/messages",
+  { preHandler: requirePermission("users:manage") },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const conversation = await prisma.supportConversation.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, email: true, displayName: true, status: true } } },
+    });
+    if (!conversation) return sendError(reply, req.id, 404, "CONVERSATION_NOT_FOUND", "Conversation not found");
+    await prisma.supportMessage.updateMany({
+      where: { conversationId: id, senderUserId: { not: auth.sub }, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return {
+      ...conversation,
+      messages: await prisma.supportMessage.findMany({
+        where: { conversationId: id },
+        include: { sender: { select: { id: true, displayName: true, role: true } } },
+        orderBy: { createdAt: "asc" },
+        take: 200,
+      }),
+    };
+  },
+);
+app.post(
+  "/api/v1/admin/conversations/:id/messages",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z.object({ body: z.string().min(1).max(5000) }).parse(req.body);
+    const conversation = await prisma.supportConversation.findUnique({ where: { id } });
+    if (!conversation) return sendError(reply, req.id, 404, "CONVERSATION_NOT_FOUND", "Conversation not found");
+    await prisma.supportMessage.updateMany({
+      where: { conversationId: id, senderUserId: { not: auth.sub }, readAt: null },
+      data: { readAt: new Date() },
+    });
+    const message = await prisma.supportMessage.create({
+      data: { conversationId: id, senderUserId: auth.sub, body: body.body.trim() },
+      include: { sender: { select: { id: true, displayName: true, role: true } } },
+    });
+    await prisma.supportConversation.update({ where: { id }, data: { updatedAt: new Date() } });
+    await audit(req as AuthRequest, "SUPPORT_MESSAGE_SENT", "CONVERSATION", id, { userId: conversation.userId });
+    return reply.code(201).send(message);
+  },
+);
+app.get("/api/v1/admin/notifications", { preHandler: requirePermission("users:manage") }, async () =>
+  prisma.userNotification.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    include: { user: { select: { id: true, email: true, displayName: true } } },
+  }),
+);
+app.post(
+  "/api/v1/admin/notifications",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const body = z
+      .object({
+        title: z.string().min(1).max(120),
+        body: z.string().min(1).max(2000),
+        allUsers: z.boolean().default(false),
+        userIds: z.array(z.string().uuid()).default([]),
+      })
+      .parse(req.body);
+    const selectedIds = [...new Set(body.userIds)];
+    const users = selectedIds.length
+      ? await prisma.user.findMany({
+          where: { id: { in: selectedIds }, role: "VIEWER", status: "ACTIVE" },
+          select: { id: true },
+        })
+      : body.allUsers
+        ? await prisma.user.findMany({ where: { role: "VIEWER", status: "ACTIVE" }, select: { id: true } })
+        : [];
+    if (!users.length)
+      return sendError(
+        reply,
+        req.id,
+        400,
+        "NOTIFICATION_RECIPIENTS_REQUIRED",
+        "Choose at least one active viewer or send to all users",
+      );
+    await prisma.userNotification.createMany({
+      data: users.map((user) => ({ userId: user.id, title: body.title.trim(), body: body.body.trim() })),
+    });
+    await audit(req as AuthRequest, "NOTIFICATION_SENT", "NOTIFICATION", undefined, {
+      allUsers: !selectedIds.length && body.allUsers,
+      count: users.length,
+      title: body.title,
+    });
+    return reply.code(201).send({ sent: users.length });
+  },
+);
+app.get("/api/v1/admin/audit-logs", { preHandler: requirePermission("audit:read") }, async () =>
+  prisma.adminAuditLog.findMany({ orderBy: { createdAt: "desc" }, take: 100 }),
+);
+app.get("/api/v1/admin/security-events", { preHandler: requirePermission("settings:security") }, async () =>
+  prisma.securityEvent.findMany({ orderBy: { createdAt: "desc" }, take: 100 }),
+);
+app.get("/api/v1/admin/playback-sessions", { preHandler: requirePermission("audit:read") }, async () =>
+  prisma.playbackSession.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    include: {
+      user: { select: { email: true, displayName: true } },
+      videoAsset: { include: { movie: true, episode: true } },
+    },
+  }),
+);
+const settingsSnapshot = async () => ({
+  registrationEnabled: config.REGISTRATION_ENABLED,
+  maxConcurrentStreams: config.MAX_CONCURRENT_STREAMS,
+  drmProvider: config.DRM_PROVIDER,
+  widevineConfigured: Boolean(config.WIDEVINE_LICENSE_URL && config.WIDEVINE_PROVIDER_API_KEY),
+  storageRoot,
+  deleteOriginalAfterPreview: await getBooleanSetting(deleteOriginalAfterPreviewKey, false),
+  ffmpegPreset: process.env.FFMPEG_PRESET ?? "veryfast",
+  ffmpegCrf: process.env.FFMPEG_CRF ?? null,
+  maintenance: await maintenanceSettings(),
+  backupSchedule: await backupScheduleSettings(),
+  alertsConfigured: alertTargetsConfigured(),
+  storageWarningPercent: await getSetting("storageWarningPercent", 80),
+  android: await androidUpdateSettings(),
+});
+app.get("/api/v1/app/config", async () => ({
+  maintenance: await maintenanceSettings(),
+  android: await androidUpdateSettings(),
+}));
+app.get("/api/v1/admin/settings", { preHandler: requirePermission("settings:security") }, settingsSnapshot);
+app.patch(
+  "/api/v1/admin/settings",
+  { preHandler: [requirePermission("settings:security"), requireCsrf] },
+  async (req) => {
+    const body = z
+      .object({
+        deleteOriginalAfterPreview: z.boolean().optional(),
+        maintenanceMode: z.boolean().optional(),
+        maintenanceMessage: z.string().max(300).optional(),
+        backupScheduleEnabled: z.boolean().optional(),
+        backupScheduleHour: z.number().int().min(0).max(23).optional(),
+        backupRetentionCount: z.number().int().min(1).max(60).optional(),
+        backupScheduleDrive: z.boolean().optional(),
+        storageWarningPercent: z.number().int().min(1).max(99).optional(),
+        androidLatestVersionName: z.string().max(40).optional(),
+        androidLatestVersionCode: z.number().int().min(1).optional(),
+        androidUpdateRequired: z.boolean().optional(),
+        androidUpdateMessage: z.string().max(300).optional(),
+        androidDownloadUrl: z.string().url().nullable().optional(),
+      })
+      .parse(req.body);
+    if (body.deleteOriginalAfterPreview !== undefined)
+      await setBooleanSetting(deleteOriginalAfterPreviewKey, body.deleteOriginalAfterPreview);
+    if (body.maintenanceMode !== undefined) await setBooleanSetting("maintenanceMode", body.maintenanceMode);
+    if (body.maintenanceMessage !== undefined) await setSetting("maintenanceMessage", body.maintenanceMessage);
+    if (body.backupScheduleEnabled !== undefined)
+      await setBooleanSetting("backupScheduleEnabled", body.backupScheduleEnabled);
+    if (body.backupScheduleHour !== undefined) await setSetting("backupScheduleHour", body.backupScheduleHour);
+    if (body.backupRetentionCount !== undefined) await setSetting("backupRetentionCount", body.backupRetentionCount);
+    if (body.backupScheduleDrive !== undefined)
+      await setBooleanSetting("backupScheduleDrive", body.backupScheduleDrive);
+    if (body.storageWarningPercent !== undefined) await setSetting("storageWarningPercent", body.storageWarningPercent);
+    if (body.androidLatestVersionName !== undefined)
+      await setSetting("androidLatestVersionName", body.androidLatestVersionName);
+    if (body.androidLatestVersionCode !== undefined)
+      await setSetting("androidLatestVersionCode", body.androidLatestVersionCode);
+    if (body.androidUpdateRequired !== undefined)
+      await setBooleanSetting("androidUpdateRequired", body.androidUpdateRequired);
+    if (body.androidUpdateMessage !== undefined) await setSetting("androidUpdateMessage", body.androidUpdateMessage);
+    if (body.androidDownloadUrl !== undefined) await setSetting("androidDownloadUrl", body.androidDownloadUrl ?? "");
+    await audit(req as AuthRequest, "SETTINGS_UPDATED", "SETTINGS", undefined, { fields: Object.keys(body) });
+    return settingsSnapshot();
+  },
+);
+app.post(
+  "/api/v1/admin/alerts/test",
+  { preHandler: [requirePermission("settings:security"), requireCsrf] },
+  async (req) => {
+    await sendPlatformAlert("SecureStream test alert", "Alerts are connected and working.", { requestId: req.id });
+    await audit(req as AuthRequest, "ALERT_TEST_SENT", "SETTINGS");
+    return { sent: alertTargetsConfigured() };
+  },
+);
+app.get("/api/v1/admin/backups", { preHandler: requirePermission("settings:security") }, async () => ({
+  storageRoot,
+  googleDriveConfigured: Boolean(driveConfig()),
+  items: await listBackups(),
+}));
+app.post(
+  "/api/v1/admin/backups",
+  {
+    preHandler: [requirePermission("settings:security"), requireCsrf],
+    config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+  },
+  async (req, reply) => {
+    const backup = await createPortableBackup();
+    await audit(req as AuthRequest, "BACKUP_CREATED", "BACKUP", backup.name, {
+      sizeBytes: backup.sizeBytes,
+      mediaFiles: backup.mediaFiles,
+    });
+    await sendPlatformAlert("SecureStream backup created", `${backup.name} is ready.`, {
+      sizeBytes: backup.sizeBytes,
+      mediaFiles: backup.mediaFiles,
+    });
+    return reply.code(201).send(backup);
+  },
+);
+app.get(
+  "/api/v1/admin/backups/:name/download",
+  { preHandler: requirePermission("settings:security") },
+  async (req, reply) => {
+    const name = safeBackupName(z.object({ name: z.string() }).parse(req.params).name);
+    if (!name) return sendError(reply, req.id, 400, "BACKUP_NAME_INVALID", "Backup file name is invalid");
+    const filePath = path.join(storageRoot, "backups", name);
+    let size = 0;
+    try {
+      size = (await stat(filePath)).size;
+    } catch {
+      return sendError(reply, req.id, 404, "BACKUP_NOT_FOUND", "Backup file not found");
+    }
+    reply
+      .header("content-type", "application/x-tar")
+      .header("content-length", String(size))
+      .header("content-disposition", `attachment; filename="${name}"`);
+    return reply.send(createReadStream(filePath));
+  },
+);
+app.delete(
+  "/api/v1/admin/backups/:name",
+  { preHandler: [requirePermission("settings:security"), requireCsrf] },
+  async (req, reply) => {
+    const name = safeBackupName(z.object({ name: z.string() }).parse(req.params).name);
+    if (!name) return sendError(reply, req.id, 400, "BACKUP_NAME_INVALID", "Backup file name is invalid");
+    await rm(path.join(storageRoot, "backups", name), { force: true });
+    await audit(req as AuthRequest, "BACKUP_DELETED", "BACKUP", name);
+    await sendPlatformAlert("SecureStream backup deleted", name);
+    return reply.code(204).send();
+  },
+);
+app.post(
+  "/api/v1/admin/backups/:name/google-drive",
+  {
+    preHandler: [requirePermission("settings:security"), requireCsrf],
+    config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+  },
+  async (req, reply) => {
+    const name = safeBackupName(z.object({ name: z.string() }).parse(req.params).name);
+    if (!name) return sendError(reply, req.id, 400, "BACKUP_NAME_INVALID", "Backup file name is invalid");
+    try {
+      const driveFile = await uploadBackupToDrive(name);
+      await audit(req as AuthRequest, "BACKUP_UPLOADED_GOOGLE_DRIVE", "BACKUP", name, {
+        driveFileId: String(driveFile.id ?? ""),
+      });
+      return driveFile;
+    } catch (error) {
+      return sendError(
+        reply,
+        req.id,
+        400,
+        "GOOGLE_DRIVE_UPLOAD_FAILED",
+        error instanceof Error ? error.message : "Google Drive upload failed",
+      );
+    }
+  },
+);
+app.post(
+  "/api/v1/admin/backups/restore",
+  {
+    preHandler: [requirePermission("settings:security"), requireCsrf],
+    config: { rateLimit: { max: 2, timeWindow: "1 hour" } },
+  },
+  async (req, reply) => {
+    const part = await req.file();
+    if (!part) return sendError(reply, req.id, 400, "BACKUP_FILE_REQUIRED", "Choose a SecureStream backup .tar file");
+    const backupsDir = path.join(storageRoot, "backups");
+    await mkdir(backupsDir, { recursive: true });
+    const restorePath = path.join(backupsDir, `restore-${randomUUID()}.tar`);
+    try {
+      await pipeline(part.file, createWriteStream(restorePath));
+      const result = await restorePortableBackup(restorePath);
+      await audit(req as AuthRequest, "BACKUP_RESTORED", "BACKUP", part.filename, { mediaFiles: result.mediaFiles });
+      await sendPlatformAlert("SecureStream backup restored", part.filename ?? "Backup restored", {
+        mediaFiles: result.mediaFiles,
+      });
+      return result;
+    } finally {
+      await rm(restorePath, { force: true }).catch(() => undefined);
+    }
+  },
+);
+app.post(
+  "/api/v1/admin/backups/run-scheduled-now",
+  {
+    preHandler: [requirePermission("settings:security"), requireCsrf],
+    config: { rateLimit: { max: 2, timeWindow: "1 hour" } },
+  },
+  async (req, reply) => {
+    const backup = await createPortableBackup();
+    const settings = await backupScheduleSettings();
+    await pruneBackups(settings.retentionCount);
+    await audit(req as AuthRequest, "BACKUP_SCHEDULE_MANUAL_RUN", "BACKUP", backup.name, {
+      sizeBytes: backup.sizeBytes,
+    });
+    await sendPlatformAlert("SecureStream scheduled backup manually created", `${backup.name} is ready.`);
+    return reply.code(201).send(backup);
+  },
+);
+app.get("/api/v1/admin/system-status", { preHandler: requirePermission("audit:read") }, async () => {
+  const memoryTotal = os.totalmem();
+  const memoryFree = os.freemem();
+  const cpus = os.cpus();
+  const loadAverage = os.loadavg();
+  const cpuCores = cpus.length || 1;
+  const cpuUsedPercent = Math.max(0, Math.min(100, Math.round(((loadAverage[0] ?? 0) / cpuCores) * 100)));
+  const storage = await statfs(storageRoot).catch(() => undefined);
+  const storageTotal = storage ? storage.blocks * storage.bsize : 0;
+  const storageFree = storage ? storage.bavail * storage.bsize : 0;
+  const network = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
+    (addresses ?? [])
+      .filter((address) => !address.internal)
+      .map((address) => ({ name, family: address.family, address: address.address, mac: address.mac })),
+  );
+  return {
+    checkedAt: new Date().toISOString(),
+    host: {
+      hostname: os.hostname(),
+      platform: os.platform(),
+      arch: os.arch(),
+      uptimeSeconds: Math.round(os.uptime()),
+      processUptimeSeconds: Math.round(process.uptime()),
+    },
+    cpu: { cores: cpuCores, loadAverage, usedPercent: cpuUsedPercent },
+    memory: {
+      totalBytes: memoryTotal,
+      freeBytes: memoryFree,
+      usedBytes: memoryTotal - memoryFree,
+      usedPercent: memoryTotal ? Math.round(((memoryTotal - memoryFree) / memoryTotal) * 100) : 0,
+    },
+    storage: {
+      path: storageRoot,
+      totalBytes: storageTotal,
+      freeBytes: storageFree,
+      usedBytes: Math.max(0, storageTotal - storageFree),
+      usedPercent: storageTotal ? Math.round(((storageTotal - storageFree) / storageTotal) * 100) : 0,
+    },
+    network: { interfaceCount: network.length, interfaces: network },
+  };
+});
+app.get("/api/v1/admin/activity", { preHandler: requirePermission("audit:read") }, async () => {
+  const rows = await prisma.adminAuditLog.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+  const users = await prisma.user.findMany({
+    where: { id: { in: [...new Set(rows.map((row) => row.actorUserId))] } },
+    select: { id: true, email: true, displayName: true, role: true },
+  });
+  const byId = new Map(users.map((user) => [user.id, user]));
+  return rows.map((row) => ({
+    id: row.id,
+    action: row.action,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    actor: byId.get(row.actorUserId) ?? null,
+    metadata: row.metadata,
+    createdAt: row.createdAt,
+    requestId: row.requestId,
+  }));
+});
+app.get("/api/v1/admin/device-sessions", { preHandler: requirePermission("users:manage") }, async () =>
+  prisma.refreshSession.findMany({
+    where: { revokedAt: null, expiresAt: { gt: new Date() }, user: { deletedAt: null } },
+    orderBy: { lastUsedAt: "desc" },
+    take: 200,
+    include: { user: { select: { id: true, email: true, displayName: true, role: true, status: true } } },
+  }),
+);
+app.delete(
+  "/api/v1/admin/device-sessions/:id",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    await prisma.refreshSession.updateMany({ where: { id }, data: { revokedAt: new Date() } });
+    await audit(req as AuthRequest, "DEVICE_SESSION_REVOKED", "SESSION", id);
+    return reply.code(204).send();
+  },
+);
+app.delete(
+  "/api/v1/admin/users/:id/sessions",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    await prisma.refreshSession.updateMany({ where: { userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
+    await audit(req as AuthRequest, "USER_SESSIONS_REVOKED", "USER", id);
+    return reply.code(204).send();
+  },
+);
+app.get("/api/v1/admin/storage-breakdown", { preHandler: requirePermission("audit:read") }, storageBreakdownReport);
+app.get("/api/v1/admin/storage-cleanup", { preHandler: requirePermission("audit:read") }, async () =>
+  storageCleanupReport(false),
+);
+app.post(
+  "/api/v1/admin/storage-cleanup",
+  { preHandler: [requirePermission("settings:security"), requireCsrf] },
+  async (req) => {
+    const report = await storageCleanupReport(true);
+    await audit(req as AuthRequest, "STORAGE_CLEANUP", "STORAGE", undefined, {
+      deletedFiles: report.deletedFiles,
+      deletedBytes: report.deletedBytes,
+      failed: report.failed.length,
+    });
+    return report;
+  },
+);
+app.get("/api/v1/admin/files", { preHandler: requirePermission("catalog:write") }, async () => {
+  const assets = await prisma.videoAsset.findMany({
+    orderBy: { updatedAt: "desc" },
+    take: 250,
+    include: {
+      movie: { select: { id: true, title: true, status: true } },
+      episode: { select: { id: true, title: true, status: true } },
+      uploads: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: {
+          id: true,
+          storageKey: true,
+          bytesExpected: true,
+          bytesReceived: true,
+          status: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      },
+    },
+  });
+  return assets.map((asset) => {
+    const upload = asset.uploads[0];
+    const sourceKey = asset.sourceStorageKey;
+    const previewKey = asset.manifestStorageKey;
+    return {
+      id: asset.id,
+      title: asset.movie?.title ?? asset.episode?.title ?? "Unattached asset",
+      ownerType: asset.movie ? "Video" : asset.episode ? "Episode" : "Asset",
+      ownerStatus: asset.movie?.status ?? asset.episode?.status ?? null,
+      movieId: asset.movieId,
+      episodeId: asset.episodeId,
+      state: asset.state,
+      durationSeconds: asset.durationSeconds,
+      sourceStorageKey: sourceKey,
+      previewStorageKey: previewKey,
+      sourceFileName: path.basename(sourceKey),
+      previewFileName: previewKey ? path.basename(previewKey) : null,
+      format: (path.extname(sourceKey).replace(".", "") || "unknown").toUpperCase(),
+      previewFormat: previewKey ? (path.extname(previewKey).replace(".", "") || "unknown").toUpperCase() : null,
+      sizeBytes: Number(upload?.bytesReceived ?? upload?.bytesExpected ?? 0),
+      expectedBytes: Number(upload?.bytesExpected ?? 0),
+      uploadStatus: upload?.status ?? null,
+      createdAt: asset.createdAt,
+      updatedAt: asset.updatedAt,
+      uploadedAt: upload?.updatedAt ?? upload?.createdAt ?? null,
+    };
+  });
+});
+app.get("/api/v1/admin/editor/jobs", { preHandler: requirePermission("catalog:write") }, async () =>
+  [...editorJobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 50),
+);
+app.get("/api/v1/admin/editor/jobs/:id", { preHandler: requirePermission("catalog:write") }, async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const job = editorJobs.get(id);
+  if (!job) return sendError(reply, req.id, 404, "EDITOR_JOB_NOT_FOUND", "Editor job not found");
+  return job;
+});
+app.post(
+  "/api/v1/admin/editor/jobs/trim",
+  {
+    preHandler: [requirePermission("catalog:write"), requireCsrf],
+    config: { rateLimit: { max: 6, timeWindow: "15 minutes" } },
+  },
+  async (req, reply) => {
+    const body = z
+      .object({
+        assetId: z.string().uuid(),
+        startSeconds: z.number().min(0),
+        endSeconds: z.number().positive(),
+        title: z.string().min(1).max(160).optional(),
+      })
+      .refine((value) => value.endSeconds > value.startSeconds, { message: "End time must be after start time" })
+      .parse(req.body);
+    const asset = await prisma.videoAsset.findUnique({
+      where: { id: body.assetId },
+      include: { movie: true, episode: true },
+    });
+    if (!asset) return sendError(reply, req.id, 404, "ASSET_NOT_FOUND", "Video asset not found");
+    const sourceKey = asset.sourceStorageKey || asset.manifestStorageKey;
+    if (!sourceKey) return sendError(reply, req.id, 404, "SOURCE_NOT_FOUND", "Source file is unavailable");
+    const inputPath = storagePathFor(sourceKey);
+    if (!inputPath) return sendError(reply, req.id, 400, "SOURCE_INVALID", "Source path is invalid");
+    try {
+      await stat(inputPath);
+    } catch {
+      return sendError(reply, req.id, 404, "SOURCE_NOT_FOUND", "Source file is unavailable on disk");
+    }
+    const sourceTitle = asset.movie?.title ?? asset.episode?.title ?? "Video";
+    const job: EditorJob = {
+      id: randomUUID(),
+      assetId: asset.id,
+      title: body.title?.trim() || `${sourceTitle} (edited)`,
+      sourceTitle,
+      startSeconds: body.startSeconds,
+      endSeconds: body.endSeconds,
+      status: "QUEUED",
+      progress: 0,
+      phase: "Queued",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    editorJobs.set(job.id, job);
+    await audit(req as AuthRequest, "EDITOR_TRIM_QUEUED", "VIDEO_ASSET", asset.id, {
+      jobId: job.id,
+      startSeconds: body.startSeconds,
+      endSeconds: body.endSeconds,
+    });
+    void runTrimEditorJob(
+      job,
+      inputPath,
+      asset.movie?.synopsis ?? asset.episode?.synopsis ?? "Edited in SecureStream admin.",
+    );
+    return reply.code(202).send(job);
+  },
+);
+
+app.get("/api/v1/admin/movies", { preHandler: requirePermission("catalog:write") }, async () =>
+  prisma.movie.findMany({
+    where: { deletedAt: null },
+    orderBy: { updatedAt: "desc" },
+    include: { assets: true },
+    take: 100,
+  }),
+);
+app.post(
+  "/api/v1/admin/movies",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const body = catalogBody.parse(req.body);
+    const movie = await prisma.movie.create({ data: { ...body, slug: body.slug ?? slugify(body.title) } });
+    await audit(req as AuthRequest, "MOVIE_CREATED", "MOVIE", movie.id, { title: movie.title });
+    return reply.code(201).send(movie);
+  },
+);
+app.patch(
+  "/api/v1/admin/movies/:id",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = catalogBody.partial().parse(req.body);
+    const movie = await prisma.movie.update({
+      where: { id },
+      data: { ...body, slug: body.slug ?? (body.title ? slugify(body.title) : undefined), version: { increment: 1 } },
+    });
+    await audit(req as AuthRequest, "MOVIE_UPDATED", "MOVIE", id, { fields: Object.keys(body) });
+    return movie;
+  },
+);
+app.post(
+  "/api/v1/admin/movies/:id/publish",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const movie = await prisma.movie.findUnique({ where: { id }, include: { assets: true } });
+    if (!movie) return sendError(reply, req.id, 404, "MOVIE_NOT_FOUND", "Movie not found");
+    if (!movieHasReadyAsset(movie))
+      return sendError(reply, req.id, 409, "PUBLISH_BLOCKED", "A ready video asset is required before publishing");
+    const updated = await prisma.movie.update({
+      where: { id },
+      data: { status: "PUBLISHED", version: { increment: 1 } },
+    });
+    await audit(req as AuthRequest, "MOVIE_PUBLISHED", "MOVIE", id);
+    return updated;
+  },
+);
+app.delete(
+  "/api/v1/admin/movies/:id",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const movie = await prisma.movie.findUnique({ where: { id }, include: { assets: true } });
+    if (!movie || movie.deletedAt) return sendError(reply, req.id, 404, "MOVIE_NOT_FOUND", "Movie not found");
+    const assetIds = movie.assets.map((asset) => asset.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.playbackSession.updateMany({
+        where: { videoAssetId: { in: assetIds }, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      await tx.movie.update({
+        where: { id },
+        data: {
+          status: "ARCHIVED",
+          deletedAt: new Date(),
+          deletedReason: "Deleted by administrator",
+          version: { increment: 1 },
+        },
+      });
+    });
+    await audit(req as AuthRequest, "MOVIE_SOFT_DELETED", "MOVIE", id, {
+      title: movie.title,
+      assetCount: assetIds.length,
+    });
+    return reply.code(204).send();
+  },
+);
+app.get("/api/v1/admin/trash", { preHandler: requirePermission("users:manage") }, async () => ({
+  users: await prisma.user.findMany({
+    where: { deletedAt: { not: null } },
+    select: {
+      id: true,
+      email: true,
+      displayName: true,
+      role: true,
+      status: true,
+      deletedAt: true,
+      deletedReason: true,
+      createdAt: true,
+    },
+    orderBy: { deletedAt: "desc" },
+    take: 100,
+  }),
+  movies: await prisma.movie.findMany({
+    where: { deletedAt: { not: null } },
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      deletedAt: true,
+      deletedReason: true,
+      createdAt: true,
+      assets: { select: { id: true, sourceStorageKey: true, manifestStorageKey: true } },
+    },
+    orderBy: { deletedAt: "desc" },
+    take: 100,
+  }),
+}));
+app.post(
+  "/api/v1/admin/trash/users/:id/restore",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const user = await prisma.user.update({
+      where: { id },
+      data: { deletedAt: null, deletedReason: null, status: "ACTIVE" },
+    });
+    await audit(req as AuthRequest, "USER_RESTORED", "USER", id, { email: user.email });
+    return publicUser(user);
+  },
+);
+app.delete(
+  "/api/v1/admin/trash/users/:id/permanent",
+  { preHandler: [requirePermission("users:manage"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const auth = (req as AuthRequest).auth;
+    if (id === auth.sub)
+      return sendError(reply, req.id, 400, "USER_DELETE_SELF", "You cannot delete your own admin account");
+    const user = await prisma.user.findUnique({ where: { id } });
+    if (!user) return sendError(reply, req.id, 404, "USER_NOT_FOUND", "User not found");
+    await prisma.$transaction(async (tx) => {
+      await tx.refreshSession.deleteMany({ where: { userId: id } });
+      await tx.passwordResetToken.deleteMany({ where: { userId: id } });
+      await tx.emailVerificationToken.deleteMany({ where: { userId: id } });
+      await tx.playbackSession.deleteMany({ where: { userId: id } });
+      await tx.watchProgress.deleteMany({ where: { userId: id } });
+      await tx.watchHistory.deleteMany({ where: { userId: id } });
+      await tx.myListItem.deleteMany({ where: { userId: id } });
+      await tx.userMovieAccess.deleteMany({ where: { userId: id } });
+      await tx.userCollectionAccess.deleteMany({ where: { userId: id } });
+      await tx.user.delete({ where: { id } });
+    });
+    await audit(req as AuthRequest, "USER_PERMANENTLY_DELETED", "USER", id, { email: user.email });
+    return reply.code(204).send();
+  },
+);
+app.post(
+  "/api/v1/admin/trash/movies/:id/restore",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const movie = await prisma.movie.update({
+      where: { id },
+      data: { deletedAt: null, deletedReason: null, status: "DRAFT", version: { increment: 1 } },
+    });
+    await audit(req as AuthRequest, "MOVIE_RESTORED", "MOVIE", id, { title: movie.title });
+    return movie;
+  },
+);
+app.delete(
+  "/api/v1/admin/trash/movies/:id/permanent",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const movie = await prisma.movie.findUnique({ where: { id }, include: { assets: true } });
+    if (!movie) return sendError(reply, req.id, 404, "MOVIE_NOT_FOUND", "Movie not found");
+    const assetIds = movie.assets.map((asset) => asset.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.collectionItem.deleteMany({ where: { movieId: id } });
+      await tx.myListItem.deleteMany({ where: { catalogId: id } });
+      if (assetIds.length) {
+        await tx.playbackSession.deleteMany({ where: { videoAssetId: { in: assetIds } } });
+        await tx.watchProgress.deleteMany({ where: { videoAssetId: { in: assetIds } } });
+        await tx.watchHistory.deleteMany({ where: { videoAssetId: { in: assetIds } } });
+        await tx.upload.deleteMany({ where: { videoAssetId: { in: assetIds } } });
+        await tx.videoRendition.deleteMany({ where: { videoAssetId: { in: assetIds } } });
+        await tx.videoAsset.deleteMany({ where: { id: { in: assetIds } } });
+      }
+      await tx.movie.delete({ where: { id } });
+    });
+    const imageKeys = [
+      storageKeyFromMediaImageUrl(movie.posterUrl),
+      storageKeyFromMediaImageUrl(movie.backdropUrl),
+    ].filter(Boolean) as string[];
+    for (const key of new Set([
+      ...movie.assets.flatMap(
+        (asset) => [asset.sourceStorageKey, asset.manifestStorageKey].filter(Boolean) as string[],
+      ),
+      ...imageKeys,
+    ])) {
+      const filePath = storagePathFor(key);
+      if (filePath) await unlink(filePath).catch(() => undefined);
+    }
+    await audit(req as AuthRequest, "MOVIE_PERMANENTLY_DELETED", "MOVIE", id, {
+      title: movie.title,
+      assetCount: assetIds.length,
+    });
+    return reply.code(204).send();
+  },
+);
+app.post(
+  "/api/v1/admin/series",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const body = seriesBody.parse(req.body);
+    const series = await prisma.series.create({ data: { ...body, slug: body.slug ?? slugify(body.title) } });
+    await audit(req as AuthRequest, "SERIES_CREATED", "SERIES", series.id, { title: series.title });
+    return reply.code(201).send(series);
+  },
+);
+app.get("/api/v1/admin/series", { preHandler: requirePermission("catalog:write") }, async () =>
+  prisma.series.findMany({
+    orderBy: { updatedAt: "desc" },
+    include: { seasons: { include: { episodes: true }, orderBy: { number: "asc" } } },
+    take: 100,
+  }),
+);
+app.post(
+  "/api/v1/admin/series/:id/seasons",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const seriesId = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z.object({ number: z.number().int().min(1), title: z.string().max(120).optional() }).parse(req.body);
+    const season = await prisma.season.create({ data: { seriesId, ...body } });
+    await audit(req as AuthRequest, "SEASON_CREATED", "SEASON", season.id, { seriesId });
+    return reply.code(201).send(season);
+  },
+);
+app.post(
+  "/api/v1/admin/seasons/:id/episodes",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const seasonId = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z
+      .object({
+        number: z.number().int().min(1),
+        title: z.string().min(1).max(160),
+        synopsis: z.string().min(1).max(3000),
+        status: z.enum(["DRAFT", "PUBLISHED", "UNPUBLISHED", "ARCHIVED"]).default("DRAFT"),
+      })
+      .parse(req.body);
+    const episode = await prisma.episode.create({ data: { seasonId, ...body } });
+    await audit(req as AuthRequest, "EPISODE_CREATED", "EPISODE", episode.id, { seasonId });
+    return reply.code(201).send(episode);
+  },
+);
+app.get("/api/v1/admin/collections", { preHandler: requirePermission("catalog:write") }, async () =>
+  prisma.collection.findMany({
+    orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }],
+    include: {
+      parent: true,
+      children: { orderBy: { sortOrder: "asc" } },
+      items: { orderBy: { sortOrder: "asc" }, include: { movie: true, series: true } },
+    },
+  }),
+);
+app.post(
+  "/api/v1/admin/collections",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const body = z
+      .object({
+        name: z.string().min(1).max(120),
+        slug: z.string().min(1).max(100).optional(),
+        published: z.boolean().default(false),
+        sortOrder: z.number().int().default(0),
+        parentId: z.string().uuid().nullable().optional(),
+        items: z
+          .array(
+            z.object({
+              movieId: z.string().uuid().optional(),
+              seriesId: z.string().uuid().optional(),
+              sortOrder: z.number().int().default(0),
+            }),
+          )
+          .default([]),
+      })
+      .parse(req.body);
+    const collection = await prisma.collection.create({
+      data: {
+        name: body.name,
+        slug: body.slug ?? slugify(body.name),
+        published: body.published,
+        sortOrder: body.sortOrder,
+        parentId: body.parentId || undefined,
+        items: { create: body.items },
+      },
+    });
+    await audit(req as AuthRequest, "COLLECTION_CREATED", "COLLECTION", collection.id);
+    return reply.code(201).send(collection);
+  },
+);
+app.patch(
+  "/api/v1/admin/collections/:id",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z
+      .object({
+        name: z.string().min(1).max(120).optional(),
+        slug: z.string().min(1).max(100).optional(),
+        published: z.boolean().optional(),
+        sortOrder: z.number().int().optional(),
+        parentId: z.string().uuid().nullable().optional(),
+        items: z
+          .array(
+            z.object({
+              movieId: z.string().uuid().optional(),
+              seriesId: z.string().uuid().optional(),
+              sortOrder: z.number().int().default(0),
+            }),
+          )
+          .optional(),
+      })
+      .parse(req.body);
+    if (body.parentId === id)
+      return sendError(reply, req.id, 400, "COLLECTION_PARENT_INVALID", "A folder cannot be its own parent");
+    const collection = await prisma.$transaction(async (tx) => {
+      if (body.items) {
+        await tx.collectionItem.deleteMany({ where: { collectionId: id } });
+        await tx.collectionItem.createMany({ data: body.items.map((item) => ({ collectionId: id, ...item })) });
+      }
+      return tx.collection.update({
+        where: { id },
+        data: {
+          name: body.name,
+          slug: body.slug ?? (body.name ? slugify(body.name) : undefined),
+          published: body.published,
+          sortOrder: body.sortOrder,
+          parentId: body.parentId,
+        },
+      });
+    });
+    await audit(req as AuthRequest, "COLLECTION_UPDATED", "COLLECTION", id);
+    return collection;
+  },
+);
+app.delete(
+  "/api/v1/admin/collections/:id",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const collection = await prisma.collection.findUnique({ where: { id } });
+    if (!collection) return sendError(reply, req.id, 404, "COLLECTION_NOT_FOUND", "Folder not found");
+    await prisma.collection.delete({ where: { id } });
+    await audit(req as AuthRequest, "COLLECTION_DELETED", "COLLECTION", id, { name: collection.name });
+    return reply.code(204).send();
+  },
+);
+app.post(
+  "/api/v1/admin/video-assets",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const body = z
+      .object({
+        movieId: z.string().uuid().optional(),
+        episodeId: z.string().uuid().optional(),
+        sourceStorageKey: z.string().min(1),
+        bytesExpected: z.number().int().positive(),
+      })
+      .refine((v) => Boolean(v.movieId) !== Boolean(v.episodeId), "Attach an asset to exactly one movie or episode")
+      .parse(req.body);
+    const asset = await prisma.videoAsset.create({
+      data: {
+        movieId: body.movieId,
+        episodeId: body.episodeId,
+        sourceStorageKey: body.sourceStorageKey,
+        state: "UPLOADING",
+        uploads: {
+          create: { storageKey: body.sourceStorageKey, bytesExpected: body.bytesExpected, status: "CREATED" },
+        },
+      },
+      include: { uploads: true },
+    });
+    await audit(req as AuthRequest, "VIDEO_ASSET_CREATED", "VIDEO_ASSET", asset.id);
+    return reply.code(201).send(asset);
+  },
+);
+app.get("/api/v1/admin/video-assets/:id/preview", async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const query = z
+    .object({ token: z.preprocess((value) => (value === "" ? undefined : value), z.string().min(20).optional()) })
+    .parse(req.query);
+  if (query.token) {
+    try {
+      const payload = await verifyAccess(query.token);
+      if (!payload.sub || typeof payload.role !== "string" || !isAdminRole(payload.role as Role))
+        return sendError(reply, req.id, 403, "FORBIDDEN", "Administrator access required");
+      await requireActiveSubject(payload.sub, req, reply);
+      if (reply.sent) return;
+      (req as AuthRequest).auth = { sub: String(payload.sub), role: payload.role as Role };
+    } catch {
+      return sendError(reply, req.id, 401, "TOKEN_INVALID", "Session expired");
+    }
+  } else {
+    await authenticate(req, reply);
+    if (reply.sent) return;
+    if (!isAdminRole((req as AuthRequest).auth.role))
+      return sendError(reply, req.id, 403, "FORBIDDEN", "Administrator access required");
+  }
+  const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
+  const previewKey = asset?.manifestStorageKey ?? asset?.sourceStorageKey;
+  if (!previewKey) return sendError(reply, req.id, 404, "PREVIEW_NOT_FOUND", "Preview file is unavailable");
+  const filePath = storagePathFor(previewKey);
+  if (!filePath) return sendError(reply, req.id, 400, "PREVIEW_INVALID", "Preview path is invalid");
+  let size = 0;
+  try {
+    size = (await stat(filePath)).size;
+  } catch {
+    return sendError(reply, req.id, 404, "PREVIEW_NOT_FOUND", "Preview file is unavailable");
+  }
+  const range = req.headers.range;
+  reply.header("accept-ranges", "bytes");
+  reply.header("cache-control", "private, max-age=60");
+  reply.header("content-type", contentTypeFor(previewKey));
+  if (range) {
+    const match = range.match(/bytes=(\d*)-(\d*)/);
+    const startRaw = match?.[1],
+      endRaw = match?.[2];
+    const start = startRaw ? Number(startRaw) : 0;
+    const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
+      return reply.code(416).header("content-range", `bytes */${size}`).send();
+    reply
+      .code(206)
+      .header("content-range", `bytes ${start}-${end}/${size}`)
+      .header("content-length", String(end - start + 1));
+    return reply.send(createReadStream(filePath, { start, end }));
+  }
+  reply.header("content-length", String(size));
+  return reply.send(createReadStream(filePath));
+});
+app.get("/api/v1/media/images/:key", async (req, reply) => {
+  const key = decodeURIComponent(z.object({ key: z.string().min(1) }).parse(req.params).key);
+  const filePath = storagePathFor(key);
+  if (!filePath || !key.startsWith("thumbnails/"))
+    return sendError(reply, req.id, 400, "IMAGE_INVALID", "Image path is invalid");
+  let size = 0;
+  try {
+    size = (await stat(filePath)).size;
+  } catch {
+    return sendError(reply, req.id, 404, "IMAGE_NOT_FOUND", "Image file is unavailable");
+  }
+  reply
+    .header("cache-control", "public, max-age=86400")
+    .header("content-type", contentTypeFor(key))
+    .header("content-length", String(size));
+  return reply.send(createReadStream(filePath));
+});
+app.get("/api/v1/admin/uploads/:id/progress", { preHandler: requirePermission("catalog:write") }, async (req) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  return conversionProgress.get(id) ?? { phase: "Waiting", progress: 0, updatedAt: Date.now() };
+});
+app.post(
+  "/api/v1/admin/uploads/direct",
+  {
+    preHandler: [requirePermission("catalog:write"), requireCsrf],
+    config: { rateLimit: { max: 8, timeWindow: "15 minutes" } },
+  },
+  async (req, reply) => {
+    const uploadIdHeader = typeof req.headers["x-upload-id"] === "string" ? req.headers["x-upload-id"] : "";
+    const requestedUploadId = z.string().uuid().safeParse(uploadIdHeader).success ? uploadIdHeader : undefined;
+    const parts = req.parts();
+    let title = "",
+      synopsis = "",
+      maturityRating = "";
+    let file:
+      | {
+          filename: string;
+          mimetype: string;
+          bytes: number;
+          storageKey: string;
+          previewStorageKey: string;
+          thumbnailStorageKey?: string;
+          durationSeconds: number;
+          sourcePath: string;
+        }
+      | undefined;
+    for await (const part of parts) {
+      if (part.type === "field") {
+        const value = String(part.value ?? "");
+        if (part.fieldname === "title") title = value;
+        if (part.fieldname === "synopsis") synopsis = value;
+        if (part.fieldname === "maturityRating") maturityRating = value;
+        continue;
+      }
+      if (part.fieldname !== "file") continue;
+      const uploadId = requestedUploadId ?? randomUUID();
+      const safeName = part.filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const storageKey = `uploads/${uploadId}-${safeName}`;
+      const previewStorageKey = `previews/${uploadId}.mp4`;
+      const thumbnailStorageKey = `thumbnails/${uploadId}.jpg`;
+      const destination = path.join(storageRoot, storageKey);
+      const previewDestination = path.join(storageRoot, previewStorageKey);
+      const thumbnailDestination = path.join(storageRoot, thumbnailStorageKey);
+      try {
+        await mkdir(path.dirname(destination), { recursive: true });
+        await mkdir(path.dirname(previewDestination), { recursive: true });
+        await mkdir(path.dirname(thumbnailDestination), { recursive: true });
+        let bytes = 0;
+        part.file.on("data", (chunk: Buffer) => (bytes += chunk.length));
+        await pipeline(part.file, createWriteStream(destination));
+        const durationSeconds = Math.round((await probeDurationSeconds(destination)) ?? 0);
+        rememberConversion(uploadId, "Converting preview", 0);
+        try {
+          await transcodePreview(destination, previewDestination, (progress) =>
+            rememberConversion(uploadId, "Converting preview", progress),
+          );
+          rememberConversion(uploadId, "Ready", 100);
+          forgetConversionLater(uploadId);
+        } catch (error) {
+          rememberConversion(uploadId, "Preview conversion failed", 100);
+          forgetConversionLater(uploadId);
+          req.log.warn(
+            { err: error, filename: part.filename },
+            "preview transcode failed; falling back to source file",
+          );
+        }
+        const finalPreviewKey = await stat(previewDestination)
+          .then(() => previewStorageKey)
+          .catch(() => storageKey);
+        const thumbnailInput = storagePathFor(finalPreviewKey) ?? destination;
+        await generateThumbnail(thumbnailInput, thumbnailDestination).catch((error) =>
+          req.log.warn({ err: error, filename: part.filename }, "thumbnail generation failed"),
+        );
+        file = {
+          filename: part.filename,
+          mimetype: part.mimetype,
+          bytes,
+          storageKey,
+          sourcePath: destination,
+          previewStorageKey: finalPreviewKey,
+          thumbnailStorageKey: await stat(thumbnailDestination)
+            .then(() => thumbnailStorageKey)
+            .catch(() => undefined),
+          durationSeconds,
+        };
+      } catch (error) {
+        req.log.error({ err: error, storageRoot }, "upload storage write failed");
+        return sendError(
+          reply,
+          req.id,
+          500,
+          "UPLOAD_STORAGE_UNWRITABLE",
+          `Upload storage is not writable at ${storageRoot}. Set STORAGE_LOCAL_ROOT to a writable volume.`,
+        );
+      }
+    }
+    if (!title.trim() || !file)
+      return sendError(reply, req.id, 400, "UPLOAD_INVALID", "Title and video file are required");
+    const thumbnailUrl = file.thumbnailStorageKey
+      ? absoluteApiUrl(req, `/api/v1/media/images/${encodeURIComponent(file.thumbnailStorageKey)}`)
+      : undefined;
+    const movie = await prisma.movie.create({
+      data: {
+        title: title.trim(),
+        synopsis: synopsis.trim() || "Uploaded from admin console.",
+        slug: `${slugify(title)}-${Date.now()}`,
+        status: "DRAFT",
+        posterUrl: thumbnailUrl,
+        backdropUrl: thumbnailUrl,
+        maturityRating: maturityRating.trim() || undefined,
+        assets: {
+          create: {
+            state: "READY",
+            sourceStorageKey: file.storageKey,
+            manifestStorageKey: file.previewStorageKey,
+            durationSeconds: file.durationSeconds || undefined,
+            uploads: {
+              create: {
+                storageKey: file.storageKey,
+                bytesExpected: file.bytes,
+                bytesReceived: file.bytes,
+                status: "COMPLETED",
+              },
+            },
+          },
+        },
+      },
+      include: { assets: true },
+    });
+    const asset = movie.assets[0];
+    let originalDeleted = false;
+    if (
+      asset &&
+      file.previewStorageKey !== file.storageKey &&
+      (await getBooleanSetting(deleteOriginalAfterPreviewKey, false))
+    ) {
+      const previewPath = storagePathFor(file.previewStorageKey);
+      const previewBytes = previewPath
+        ? Number((await stat(previewPath).catch(() => ({ size: file.bytes }))).size)
+        : file.bytes;
+      await unlink(file.sourcePath)
+        .then(() => {
+          originalDeleted = true;
+        })
+        .catch((error) =>
+          req.log.warn({ err: error, storageKey: file.storageKey }, "could not delete original after preview"),
+        );
+      if (originalDeleted)
+        await prisma.$transaction([
+          prisma.videoAsset.update({ where: { id: asset.id }, data: { sourceStorageKey: file.previewStorageKey } }),
+          prisma.upload.updateMany({
+            where: { videoAssetId: asset.id, storageKey: file.storageKey },
+            data: { storageKey: file.previewStorageKey, bytesExpected: previewBytes, bytesReceived: previewBytes },
+          }),
+        ]);
+    }
+    await audit(req as AuthRequest, "DIRECT_UPLOAD_COMPLETED", "MOVIE", movie.id, {
+      filename: file.filename,
+      bytes: file.bytes,
+      mimetype: file.mimetype,
+      previewStorageKey: file.previewStorageKey,
+      thumbnailStorageKey: file.thumbnailStorageKey,
+      durationSeconds: file.durationSeconds,
+      originalDeleted,
+    });
+    return reply
+      .code(201)
+      .send(
+        originalDeleted ? await prisma.movie.findUnique({ where: { id: movie.id }, include: { assets: true } }) : movie,
+      );
+  },
+);
+app.post(
+  "/api/v1/admin/uploads/:id/parts",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z.object({ partCount: z.number().int().min(1).max(1000) }).parse(req.body);
+    const parts = Array.from({ length: body.partCount }, (_, i) => ({
+      partNumber: i + 1,
+      uploadUrl: `/api/v1/admin/uploads/${id}/parts/${i + 1}`,
+    }));
+    const upload = await prisma.upload.update({ where: { id }, data: { status: "PARTS_ISSUED", parts } });
+    await audit(req as AuthRequest, "UPLOAD_PARTS_ISSUED", "UPLOAD", id, { partCount: body.partCount });
+    return { ...upload, parts };
+  },
+);
+app.post(
+  "/api/v1/admin/uploads/:id/complete",
+  { preHandler: [requirePermission("catalog:write"), requireCsrf] },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const body = z
+      .object({
+        bytesReceived: z.number().int().positive(),
+        durationSeconds: z.number().int().positive().optional(),
+        manifestStorageKey: z.string().min(1).optional(),
+      })
+      .parse(req.body);
+    const upload = await prisma.upload.findUnique({ where: { id }, include: { videoAsset: true } });
+    if (!upload) return sendError(reply, req.id, 404, "UPLOAD_NOT_FOUND", "Upload not found");
+    if (BigInt(body.bytesReceived) > upload.bytesExpected)
+      return sendError(reply, req.id, 400, "UPLOAD_TOO_LARGE", "Received bytes exceed declared upload size");
+    const asset = await prisma.$transaction(async (tx) => {
+      await tx.upload.update({ where: { id }, data: { status: "COMPLETED", bytesReceived: body.bytesReceived } });
+      return tx.videoAsset.update({
+        where: { id: upload.videoAssetId },
+        data: {
+          state: body.manifestStorageKey ? "READY" : "QUEUED",
+          durationSeconds: body.durationSeconds,
+          manifestStorageKey: body.manifestStorageKey,
+        },
+      });
+    });
+    if (!body.manifestStorageKey)
+      await processingQueue.add(
+        "transcode",
+        { assetId: asset.id, input: upload.storageKey, output: `${upload.videoAssetId}/manifest.m3u8` },
+        { attempts: 3, backoff: { type: "exponential", delay: 30_000 } },
+      );
+    await audit(req as AuthRequest, "UPLOAD_COMPLETED", "UPLOAD", id, { queued: !body.manifestStorageKey });
+    return asset;
+  },
+);
+app.get("/api/v1/admin/processing/jobs", { preHandler: requirePermission("catalog:write") }, async () => ({
+  waiting: await processingQueue.getWaitingCount(),
+  active: await processingQueue.getActiveCount(),
+  failed: await processingQueue.getFailedCount(),
+  completed: await processingQueue.getCompletedCount(),
+}));
+
+app.get("/api/v1/catalog", { preHandler: authenticate }, async (req) => {
+  const auth = (req as AuthRequest).auth;
+  const [scope, userDefault] = await Promise.all([
+    userAccessScope(auth.sub),
+    prisma.user.findUnique({ where: { id: auth.sub }, select: { defaultCollectionId: true } }),
+  ]);
+  const defaultCollectionId = userDefault?.defaultCollectionId ?? null;
+  const [collections, movies] = await Promise.all([
+    prisma.collection.findMany({
+      where: { published: true, ...(scope ? { id: { in: [...scope.collectionIds] } } : {}) },
+      orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }],
+      include: {
+        parent: true,
+        items: { orderBy: { sortOrder: "asc" }, include: { movie: { include: { assets: true } }, series: true } },
+      },
+    }),
+    prisma.movie.findMany({
+      where: { status: "PUBLISHED", deletedAt: null, ...(scope ? { id: { in: [...scope.movieIds] } } : {}) },
+      include: { assets: true },
+      orderBy: [{ featured: "desc" }, { updatedAt: "desc" }],
+      take: 50,
+    }),
+  ]);
+  await ensureMovieDurations([
+    ...(movies as MovieWithAssets[]),
+    ...(collections.flatMap((collection) =>
+      collection.items.map((item) => item.movie).filter(Boolean),
+    ) as MovieWithAssets[]),
+  ]);
+  const collectionRails = collections
+    .map((collection) => ({
+      id: collection.id,
+      name: collection.parent ? `${collection.parent.name} / ${collection.name}` : collection.name,
+      slug: collection.slug,
+      parentId: collection.parentId,
+      parentName: collection.parent?.name ?? null,
+      items: collection.items.flatMap<CatalogCard>((item) => {
+        if (
+          item.movie &&
+          !item.movie.deletedAt &&
+          (!scope || scope.movieIds.has(item.movie.id)) &&
+          item.movie.status === "PUBLISHED" &&
+          isCurrentlyAvailable(item.movie) &&
+          movieHasReadyAsset(item.movie)
+        )
+          return [toMovieCard(item.movie)];
+        if (item.series && item.series.status === "PUBLISHED") return [toSeriesCard(item.series)];
+        return [];
+      }),
+    }))
+    .filter((rail) => rail.items.length > 0);
+  const collectionMovieIds = new Set(
+    collectionRails.flatMap((rail) => rail.items.filter((item) => item.kind === "MOVIE").map((item) => item.id)),
+  );
+  const movieItems = movies
+    .filter((movie) => isCurrentlyAvailable(movie) && movieHasReadyAsset(movie) && !collectionMovieIds.has(movie.id))
+    .map(toMovieCard);
+  return {
+    defaultCollectionId,
+    rails: [
+      ...collectionRails,
+      ...(movieItems.length
+        ? [
+            {
+              id: "default-videos",
+              name: "Videos",
+              slug: "videos",
+              parentId: null,
+              parentName: null,
+              items: movieItems,
+            },
+          ]
+        : []),
+    ],
+  };
+});
+app.get("/api/v1/search", { preHandler: authenticate }, async (req) => {
+  const auth = (req as AuthRequest).auth;
+  const scope = await userAccessScope(auth.sub);
+  const q = z.object({ q: z.string().min(2).max(100), genre: z.string().optional() }).parse(req.query);
+  const [movies, collections] = await Promise.all([
+    prisma.movie.findMany({
+      where: {
+        status: "PUBLISHED",
+        deletedAt: null,
+        ...(scope ? { id: { in: [...scope.movieIds] } } : {}),
+        genres: q.genre ? { has: q.genre } : undefined,
+        OR: [
+          { title: { contains: q.q, mode: "insensitive" } },
+          { synopsis: { contains: q.q, mode: "insensitive" } },
+          { tags: { has: q.q } },
+        ],
+      },
+      include: { assets: true },
+      take: 30,
+    }),
+    prisma.collection.findMany({
+      where: {
+        published: true,
+        ...(scope ? { id: { in: [...scope.collectionIds] } } : {}),
+        OR: [{ name: { contains: q.q, mode: "insensitive" } }, { slug: { contains: q.q, mode: "insensitive" } }],
+      },
+      include: { items: { include: { movie: { include: { assets: true } } } } },
+      take: 10,
+    }),
+  ]);
+  const folderMovies = collections.flatMap((collection) =>
+    collection.items.flatMap((item) => (item.movie && !item.movie.deletedAt ? [item.movie] : [])),
+  );
+  const allMovies = [...movies, ...folderMovies].filter(
+    (movie, index, self) => self.findIndex((item) => item.id === movie.id) === index,
+  );
+  await ensureMovieDurations(allMovies as MovieWithAssets[]);
+  return allMovies
+    .filter(
+      (movie) =>
+        (!scope || scope.movieIds.has(movie.id)) &&
+        movie.status === "PUBLISHED" &&
+        !movie.deletedAt &&
+        isCurrentlyAvailable(movie) &&
+        movieHasReadyAsset(movie),
+    )
+    .map(toMovieCard);
+});
+app.post(
+  "/api/v1/offline/downloads",
+  { preHandler: authenticate, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const body = z.object({ videoId: z.string().uuid(), deviceId: z.string().min(8) }).parse(req.body);
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: auth.sub } });
+    if (user.status !== "ACTIVE" || user.deletedAt)
+      return sendError(reply, req.id, 403, "ACCOUNT_BLOCKED", "Offline downloads unavailable");
+    const asset = await prisma.videoAsset.findFirst({
+      where: { state: "READY", OR: [{ id: body.videoId }, { movieId: body.videoId }, { episodeId: body.videoId }] },
+      include: { movie: true, episode: true },
+    });
+    if (!asset || !asset.manifestStorageKey)
+      return sendError(reply, req.id, 404, "VIDEO_UNAVAILABLE", "Video is unavailable for offline download");
+    if (asset.movie && !(await canAccessMovie(user.id, asset.movie.id)))
+      return sendError(reply, req.id, 403, "TITLE_FORBIDDEN", "This user is not allowed to watch this video");
+    if (
+      asset.movie &&
+      (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+    )
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+    if (asset.episode && asset.episode.status !== "PUBLISHED")
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+    const filePath = storagePathFor(asset.manifestStorageKey);
+    if (!filePath) return sendError(reply, req.id, 400, "DOWNLOAD_INVALID", "Download path is invalid");
+    let bytesExpected = 0;
+    try {
+      bytesExpected = (await stat(filePath)).size;
+    } catch {
+      return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
+    }
+    const expiresAt = new Date(Date.now() + offlineDownloadTtlSeconds * 1000);
+    const token = await signOfflineDownload({
+      sub: user.id,
+      videoId: asset.id,
+      deviceId: body.deviceId,
+      expiresInSeconds: offlineDownloadTtlSeconds,
+    });
+    return {
+      videoAssetId: asset.id,
+      downloadUrl: absoluteApiUrl(req, `/api/v1/media/${asset.id}/download?dt=${token}`),
+      bytesExpected,
+      headers: {},
+      expiresAt: expiresAt.toISOString(),
+      storage: "APP_PRIVATE_ONLY",
+    };
+  },
+);
+app.post(
+  "/api/v1/playback/sessions",
+  { preHandler: authenticate, config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const body = z
+      .object({ videoId: z.string().uuid(), deviceId: z.string().min(8), riskSignals: z.array(z.string()).default([]) })
+      .parse(req.body);
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: auth.sub } });
+    if (user.status !== "ACTIVE" || user.deletedAt)
+      return sendError(reply, req.id, 403, "ACCOUNT_BLOCKED", "Playback unavailable");
+    const asset = await prisma.videoAsset.findFirst({
+      where: { state: "READY", OR: [{ id: body.videoId }, { movieId: body.videoId }, { episodeId: body.videoId }] },
+      include: { movie: true, episode: true },
+    });
+    if (!asset || !asset.manifestStorageKey)
+      return sendError(reply, req.id, 404, "VIDEO_UNAVAILABLE", "Video is unavailable");
+    if (asset.movie && !(await canAccessMovie(user.id, asset.movie.id)))
+      return sendError(reply, req.id, 403, "TITLE_FORBIDDEN", "This user is not allowed to watch this video");
+    if (
+      asset.movie &&
+      (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+    )
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+    if (asset.episode && asset.episode.status !== "PUBLISHED")
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+    if (config.DRM_PROVIDER === "widevine" && (!config.WIDEVINE_LICENSE_URL || !asset.drmKeyId))
+      return sendError(reply, req.id, 503, "DRM_UNAVAILABLE", "Protected playback is not configured for this asset");
+    await prisma.playbackSession.updateMany({
+      where: { userId: user.id, deviceId: body.deviceId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+    const active = await prisma.playbackSession.count({
+      where: { userId: user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+    });
+    if (active >= config.MAX_CONCURRENT_STREAMS)
+      return sendError(reply, req.id, 409, "STREAM_LIMIT", "Concurrent stream limit reached");
+    const sid = randomUUID(),
+      expiresAt = new Date(Date.now() + config.PLAYBACK_SESSION_TTL_SECONDS * 1000);
+    const token = await signPlayback({ sub: user.id, sid, videoId: asset.id, deviceId: body.deviceId });
+    await prisma.playbackSession.create({
+      data: {
+        id: sid,
+        userId: user.id,
+        videoAssetId: asset.id,
+        deviceId: body.deviceId,
+        expiresAt,
+        riskSignals: body.riskSignals,
+      },
+    });
+    await prisma.watchHistory.create({ data: { userId: user.id, videoAssetId: asset.id } });
+    return {
+      sessionId: sid,
+      manifestUrl: absoluteApiUrl(req, `/api/v1/media/${asset.id}/manifest?pt=${token}`),
+      headers: { "X-Playback-Session": sid },
+      licenseUrl: config.DRM_PROVIDER === "widevine" ? config.WIDEVINE_LICENSE_URL : undefined,
+      videoAssetId: asset.id,
+      watermark: { text: `${user.id.slice(0, 4)}..${sid.slice(-4)}`, opacity: 0.22, moveEverySeconds: 18 },
+      expiresAt: expiresAt.toISOString(),
+    };
+  },
+);
+app.post("/api/v1/playback/progress", { preHandler: authenticate }, async (req, reply) => {
+  const auth = (req as AuthRequest).auth;
+  const body = z
+    .object({
+      videoAssetId: z.string().uuid(),
+      positionSeconds: z.number().int().min(0),
+      completed: z.boolean().default(false),
+    })
+    .parse(req.body);
+  const asset = await prisma.videoAsset.findFirst({
+    where: { OR: [{ id: body.videoAssetId }, { movieId: body.videoAssetId }, { episodeId: body.videoAssetId }] },
+  });
+  if (!asset) return sendError(reply, req.id, 404, "VIDEO_UNAVAILABLE", "Video is unavailable");
+  return prisma.watchProgress.upsert({
+    where: { userId_videoAssetId: { userId: auth.sub, videoAssetId: asset.id } },
+    create: {
+      userId: auth.sub,
+      videoAssetId: asset.id,
+      positionSeconds: body.positionSeconds,
+      completed: body.completed,
+    },
+    update: { positionSeconds: body.positionSeconds, completed: body.completed, version: { increment: 1 } },
+  });
+});
+app.get("/api/v1/playback/progress", { preHandler: authenticate }, async (req) =>
+  prisma.watchProgress.findMany({
+    where: { userId: (req as AuthRequest).auth.sub },
+    orderBy: { updatedAt: "desc" },
+    take: 100,
+  }),
+);
+app.get("/api/v1/history", { preHandler: authenticate }, async (req) =>
+  prisma.watchHistory.findMany({
+    where: { userId: (req as AuthRequest).auth.sub, removedAt: null },
+    include: { videoAsset: { include: { movie: true, episode: true } } },
+    orderBy: { watchedAt: "desc" },
+    take: 100,
+  }),
+);
+app.delete("/api/v1/history/:id", { preHandler: authenticate }, async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  await prisma.watchHistory.updateMany({
+    where: { id, userId: (req as AuthRequest).auth.sub },
+    data: { removedAt: new Date() },
+  });
+  return reply.code(204).send();
+});
+app.post("/api/v1/my-list", { preHandler: authenticate }, async (req, reply) => {
+  const body = z.object({ catalogId: z.string().uuid(), kind: z.enum(["MOVIE", "SERIES"]) }).parse(req.body);
+  const userId = (req as AuthRequest).auth.sub;
+  const item = await prisma.myListItem.upsert({
+    where: { userId_catalogId: { userId, catalogId: body.catalogId } },
+    create: { userId, ...body },
+    update: { kind: body.kind },
+  });
+  return reply.code(201).send(item);
+});
+app.get("/api/v1/my-list", { preHandler: authenticate }, async (req) =>
+  prisma.myListItem.findMany({ where: { userId: (req as AuthRequest).auth.sub }, orderBy: { createdAt: "desc" } }),
+);
+app.delete("/api/v1/my-list/:catalogId", { preHandler: authenticate }, async (req, reply) => {
+  const catalogId = z.object({ catalogId: z.string().uuid() }).parse(req.params).catalogId;
+  await prisma.myListItem.deleteMany({ where: { userId: (req as AuthRequest).auth.sub, catalogId } });
+  return reply.code(204).send();
+});
+app.get("/api/v1/media/:id/manifest", async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const query = z.object({ pt: z.string().min(20).optional() }).parse(req.query);
+  if (query.pt) {
+    try {
+      const payload = await verifyPlayback(query.pt);
+      if (payload.videoId !== id || payload.scope !== "playback")
+        return sendError(reply, req.id, 403, "FORBIDDEN", "Playback token is not valid for this video");
+      await requireActiveSubject(payload.sub, req, reply);
+      if (reply.sent) return;
+    } catch {
+      return sendError(reply, req.id, 401, "TOKEN_INVALID", "Playback session expired");
+    }
+  } else {
+    await authenticate(req, reply);
+    if (reply.sent) return;
+  }
+  const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
+  if (!asset?.manifestStorageKey) return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest is unavailable");
+  if (
+    asset.movie &&
+    (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+  )
+    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+  if (asset.episode && asset.episode.status !== "PUBLISHED")
+    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+  const filePath = storagePathFor(asset.manifestStorageKey);
+  if (!filePath) return sendError(reply, req.id, 400, "MANIFEST_INVALID", "Manifest path is invalid");
+  let size = 0;
+  try {
+    size = (await stat(filePath)).size;
+  } catch {
+    return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest file is unavailable");
+  }
+  const range = req.headers.range;
+  reply.header("accept-ranges", "bytes");
+  reply.header("cache-control", "private, max-age=60");
+  reply.header("content-type", contentTypeFor(asset.manifestStorageKey));
+  if (range) {
+    const match = range.match(/bytes=(\d*)-(\d*)/);
+    const startRaw = match?.[1],
+      endRaw = match?.[2];
+    const start = startRaw ? Number(startRaw) : 0;
+    const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
+      return reply.code(416).header("content-range", `bytes */${size}`).send();
+    reply
+      .code(206)
+      .header("content-range", `bytes ${start}-${end}/${size}`)
+      .header("content-length", String(end - start + 1));
+    return reply.send(createReadStream(filePath, { start, end }));
+  }
+  reply.header("content-length", String(size));
+  return reply.send(createReadStream(filePath));
+});
+app.get("/api/v1/media/:id/download", async (req, reply) => {
+  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+  const query = z.object({ dt: z.string().min(20) }).parse(req.query);
+  try {
+    const payload = await verifyPlayback(query.dt);
+    if (payload.videoId !== id || payload.scope !== "offline-download")
+      return sendError(reply, req.id, 403, "FORBIDDEN", "Download token is not valid for this video");
+    await requireActiveSubject(payload.sub, req, reply);
+    if (reply.sent) return;
+  } catch {
+    return sendError(reply, req.id, 401, "TOKEN_INVALID", "Offline download link expired");
+  }
+  const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
+  const key = asset?.manifestStorageKey;
+  if (!asset || !key) return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
+  if (
+    asset.movie &&
+    (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+  )
+    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+  if (asset.episode && asset.episode.status !== "PUBLISHED")
+    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+  const filePath = storagePathFor(key);
+  if (!filePath) return sendError(reply, req.id, 400, "DOWNLOAD_INVALID", "Download path is invalid");
+  let size = 0;
+  try {
+    size = (await stat(filePath)).size;
+  } catch {
+    return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
+  }
+  const range = req.headers.range;
+  const extension = path.extname(key) || ".mp4";
+  const filename = `${slugify(asset.movie?.title ?? asset.episode?.title ?? "securestream-video")}${extension}`;
+  reply.header("accept-ranges", "bytes");
+  reply.header("cache-control", "private, no-store");
+  reply.header("content-disposition", `inline; filename="${filename}"`);
+  reply.header("content-type", contentTypeFor(key));
+  if (range) {
+    const match = range.match(/bytes=(\d*)-(\d*)/);
+    const startRaw = match?.[1],
+      endRaw = match?.[2];
+    const start = startRaw ? Number(startRaw) : 0;
+    const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
+      return reply.code(416).header("content-range", `bytes */${size}`).send();
+    reply
+      .code(206)
+      .header("content-range", `bytes ${start}-${end}/${size}`)
+      .header("content-length", String(end - start + 1));
+    return reply.send(createReadStream(filePath, { start, end }));
+  }
+  reply.header("content-length", String(size));
+  return reply.send(createReadStream(filePath));
+});
+
+setInterval(
+  () => void runScheduledBackupIfDue().catch((error) => app.log.error({ err: error }, "scheduled backup failed")),
+  5 * 60_000,
+);
+void runScheduledBackupIfDue().catch((error) => app.log.error({ err: error }, "scheduled backup failed"));
+
+await app.listen({ host: "0.0.0.0", port: 4000 });

@@ -10,6 +10,16 @@ process.env.ADMIN_ORIGIN ??= "http://localhost:3000";
 
 test("opaque refresh tokens are random and only hashes are stable", async () => {
   const { hashToken, opaqueToken } = await import("./security.js");
-  const a=opaqueToken(),b=opaqueToken();assert.notEqual(a,b);assert.equal(hashToken(a),hashToken(a));assert.notEqual(hashToken(a),a)
+  const a = opaqueToken(),
+    b = opaqueToken();
+  assert.notEqual(a, b);
+  assert.equal(hashToken(a), hashToken(a));
+  assert.notEqual(hashToken(a), a);
 });
-test("access tokens carry subject and role",async()=>{const { signAccess, verifyAccess } = await import("./security.js");const token=await signAccess("viewer-1","VIEWER");const payload=await verifyAccess(token);assert.equal(payload.sub,"viewer-1");assert.equal(payload.role,"VIEWER")});
+test("access tokens carry subject and role", async () => {
+  const { signAccess, verifyAccess } = await import("./security.js");
+  const token = await signAccess("viewer-1", "VIEWER");
+  const payload = await verifyAccess(token);
+  assert.equal(payload.sub, "viewer-1");
+  assert.equal(payload.role, "VIEWER");
+});
