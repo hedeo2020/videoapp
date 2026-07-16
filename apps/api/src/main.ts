@@ -12,13 +12,14 @@ import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import { type Prisma, PrismaClient, type Role } from "@prisma/client";
 import argon2 from "argon2";
-import { Queue } from "bullmq";
+import { Job, Queue, QueueEvents } from "bullmq";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { SignJWT } from "jose";
 import { z } from "zod";
 import { isAdminRole, issueSession, publicUser, rotateSession, verifyPasswordAndTrack } from "./auth.js";
 import { type CatalogCard, isCurrentlyAvailable, movieHasReadyAsset, toMovieCard, toSeriesCard } from "./catalog.js";
 import { config } from "./config.js";
+import { parseCompletedTranscodeResult, shouldMarkJobFailed } from "./processing.js";
 import { hasPermission } from "./rbac.js";
 import {
   hashToken,
@@ -32,6 +33,7 @@ import {
 
 const prisma = new PrismaClient();
 const processingQueue = new Queue("video-processing", { connection: { url: config.REDIS_URL } });
+const processingEvents = new QueueEvents("video-processing", { connection: { url: config.REDIS_URL } });
 const app = Fastify({
   logger: {
     level: config.NODE_ENV === "production" ? "info" : "debug",
@@ -61,6 +63,11 @@ await app.register(multipart, {
   },
 });
 await app.register(rateLimit, { max: 300, timeWindow: "1 minute" });
+app.addHook("onClose", async () => {
+  await processingEvents.close();
+  await processingQueue.close();
+  await prisma.$disconnect();
+});
 
 type Auth = { sub: string; role: Role };
 type AuthRequest = FastifyRequest & { auth: Auth };
@@ -868,6 +875,65 @@ const getSetting = async <T>(key: string, fallback: T) => {
 };
 const setSetting = (key: string, value: Prisma.InputJsonValue) =>
   prisma.platformSetting.upsert({ where: { key }, create: { key, value }, update: { value } });
+const markVideoAssetTranscodeFailed = async (assetId: string, failureReason: string) => {
+  await prisma.videoAsset.update({
+    where: { id: assetId },
+    data: { state: "FAILED", failureReason: failureReason.slice(0, 2000) },
+  });
+};
+const setupProcessingQueueEvents = () => {
+  // QueueEvents are Redis pub/sub notifications. If the API is offline exactly when a
+  // worker finishes, the event can be missed; a later reconciliation sweep should compare
+  // QUEUED assets against BullMQ history if that becomes an operational issue.
+  processingEvents.on("completed", async ({ jobId, returnvalue }) => {
+    try {
+      const job = await Job.fromId(processingQueue, jobId);
+      const result = parseCompletedTranscodeResult(returnvalue ?? job?.returnvalue);
+      const keys = [result.manifestKey, ...result.renditions.map((rendition) => rendition.storageKey)];
+      if (keys.some((key) => !storagePathFor(key))) throw new Error("Worker returned an unsafe media storage key");
+      await prisma.$transaction(async (tx) => {
+        await tx.videoAsset.update({
+          where: { id: result.assetId },
+          data: {
+            state: "READY",
+            manifestStorageKey: result.manifestKey,
+            durationSeconds: result.durationSeconds,
+            failureReason: null,
+          },
+        });
+        await tx.videoRendition.deleteMany({ where: { videoAssetId: result.assetId } });
+        await tx.videoRendition.createMany({
+          data: result.renditions.map((rendition) => ({
+            videoAssetId: result.assetId,
+            height: rendition.height,
+            bitrateKbps: rendition.bitrateKbps,
+            codec: rendition.codec,
+            storageKey: rendition.storageKey,
+          })),
+        });
+      });
+      app.log.info({ jobId, assetId: result.assetId }, "video transcode completed");
+    } catch (error) {
+      app.log.error({ err: error, jobId }, "failed to apply completed transcode result");
+      const job = await Job.fromId(processingQueue, jobId).catch(() => undefined);
+      const assetId = typeof job?.data?.assetId === "string" ? job.data.assetId : undefined;
+      if (assetId) await markVideoAssetTranscodeFailed(assetId, error instanceof Error ? error.message : "Invalid transcode result");
+    }
+  });
+  processingEvents.on("failed", async ({ jobId, failedReason }) => {
+    try {
+      const job = await Job.fromId(processingQueue, jobId);
+      if (!job) return;
+      if (!shouldMarkJobFailed({ attemptsMade: job.attemptsMade, attempts: job.opts.attempts })) return;
+      const assetId = typeof job.data?.assetId === "string" ? job.data.assetId : undefined;
+      if (!assetId) return;
+      await markVideoAssetTranscodeFailed(assetId, failedReason || "Video processing failed");
+      app.log.warn({ jobId, assetId }, "video transcode failed after retries");
+    } catch (error) {
+      app.log.error({ err: error, jobId }, "failed to apply failed transcode result");
+    }
+  });
+};
 const maintenanceSettings = async () => ({
   enabled: await getBooleanSetting("maintenanceMode", false),
   message: await getSetting("maintenanceMessage", "SecureStream is under maintenance. Please try again later."),
@@ -2201,6 +2267,7 @@ app.get("/api/v1/admin/files", { preHandler: requirePermission("catalog:write") 
       movieId: asset.movieId,
       episodeId: asset.episodeId,
       state: asset.state,
+      failureReason: asset.failureReason,
       durationSeconds: asset.durationSeconds,
       sourceStorageKey: sourceKey,
       previewStorageKey: previewKey,
@@ -2957,7 +3024,12 @@ app.post(
     if (!body.manifestStorageKey)
       await processingQueue.add(
         "transcode",
-        { assetId: asset.id, input: upload.storageKey, output: `${upload.videoAssetId}/manifest.m3u8` },
+        {
+          assetId: asset.id,
+          input: upload.storageKey,
+          outputDir: `${upload.videoAssetId}/`,
+          enabledRenditions: config.ENABLED_RENDITIONS,
+        },
         { attempts: 3, backoff: { type: "exponential", delay: 30_000 } },
       );
     await audit(req as AuthRequest, "UPLOAD_COMPLETED", "UPLOAD", id, { queued: !body.manifestStorageKey });
@@ -3387,4 +3459,5 @@ setInterval(
 );
 void runScheduledBackupIfDue().catch((error) => app.log.error({ err: error }, "scheduled backup failed"));
 
+setupProcessingQueueEvents();
 await app.listen({ host: "0.0.0.0", port: 4000 });

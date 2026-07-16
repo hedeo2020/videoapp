@@ -1821,6 +1821,7 @@ function FileManagerPanel({ files }: { files: RecordItem[] }) {
                   <small>
                     {file.uploadStatus ? `Upload ${String(file.uploadStatus).toLowerCase()}` : "No upload row"}
                   </small>
+                  {file.failureReason ? <small className="danger-text">{String(file.failureReason)}</small> : null}
                 </td>
                 <td>{formatRuntime(file.durationSeconds)}</td>
                 <td>{formatDateTime(file.updatedAt)}</td>

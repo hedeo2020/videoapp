@@ -8,6 +8,13 @@ const optionalUrl = z.preprocess(
   (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
   z.string().url().optional(),
 );
+const renditionList = z.preprocess(
+  (value) => (typeof value === "string" ? value.split(",").map((part) => Number(part.trim())) : value),
+  z
+    .array(z.number().int().positive().max(4320))
+    .min(1)
+    .transform((heights) => [...new Set(heights)].sort((a, b) => a - b)),
+);
 export const config = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -28,6 +35,7 @@ export const config = z
     EMAIL_TOKEN_TTL_MINUTES: z.coerce.number().int().min(5).default(30),
     ADMIN_COOKIE_NAME: z.string().default("ss_admin"),
     ADMIN_CSRF_COOKIE_NAME: z.string().default("ss_csrf"),
+    ENABLED_RENDITIONS: renditionList.default([360, 480, 720]),
   })
   .superRefine((v, c) => {
     if (
