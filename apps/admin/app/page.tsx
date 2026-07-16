@@ -100,6 +100,7 @@ function Dashboard({ admin }: { admin: Admin }) {
   const [active, setActive] = useState<Tab>("Overview");
   const [data, setData] = useState<Record<string, unknown>>({});
   const [sidebarHidden, setSidebarHidden] = useState(false);
+  const [collapsedNavGroups, setCollapsedNavGroups] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [conversionProgress, setConversionProgress] = useState<number | null>(null);
@@ -232,6 +233,10 @@ function Dashboard({ admin }: { admin: Admin }) {
   function animatePress(event: MouseEvent<HTMLButtonElement>) {
     if (prefersReducedMotion()) return;
     animate(event.currentTarget, { scale: [0.97, 1], duration: 260, ease: "outBack" });
+  }
+
+  function toggleNavGroup(label: string) {
+    setCollapsedNavGroups((groups) => ({ ...groups, [label]: !groups[label] }));
   }
 
   async function uploadMovie(event: FormEvent<HTMLFormElement>) {
@@ -828,17 +833,23 @@ function Dashboard({ admin }: { admin: Admin }) {
     <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
       <aside>
         <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={(event) => { animatePress(event); setSidebarHidden(true); }} title="Hide admin panel">‹</button></div>
-        <nav className="navgroups">{navGroups.map((group) => (
-          <section className="navgroup" key={group.label} aria-label={group.label}>
-            <b>{group.label}</b>
-            <div>
+        <nav className="navgroups">{navGroups.map((group) => {
+          const expanded = !collapsedNavGroups[group.label];
+          const hasActiveItem = group.items.includes(active);
+          return (
+          <section className={`navgroup ${hasActiveItem ? "has-active" : ""}`} key={group.label} aria-label={group.label}>
+            <button className="navgroup-toggle" type="button" aria-expanded={expanded} onClick={(event) => { animatePress(event); toggleNavGroup(group.label); }}>
+              <span>{group.label}</span>
+              <i aria-hidden="true">{expanded ? "−" : "+"}</i>
+            </button>
+            {expanded && <div className="navgroup-items">
               {group.items.map((item) => {
                 const badge = item === "Messages" ? unreadMessages : 0;
                 return <button className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); }}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
               })}
-            </div>
+            </div>}
           </section>
-        ))}</nav>
+        );})}</nav>
         <div className="operator"><span>{admin.displayName.slice(0, 2).toUpperCase()}</span><div><b>{admin.displayName}</b><small>{admin.role.replace("_", " ").toLowerCase()}</small></div></div>
       </aside>
       <main ref={mainRef}>
