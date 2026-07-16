@@ -480,9 +480,9 @@ aside{
   box-shadow:none;
 }
 
-.lockmark svg{fill:#fff}
-.lockmark .lockhole{fill:#fff}
-.lockmark .lockslot{stroke:#fff}
+.lockmark svg{fill:#08100f}
+.lockmark .lockhole{fill:#08100f}
+.lockmark .lockslot{stroke:#08100f}
 
 .navgroups{
   flex:1 1 auto;
@@ -1031,20 +1031,33 @@ pre{
     position:fixed;
     top:0;
     bottom:0;
+    left:0;
+    z-index:60;
+    display:flex;
     width:min(88vw,320px);
     height:100dvh;
     max-height:none;
     padding:16px 14px;
     border-right:var(--border-width) solid var(--color-border);
     border-bottom:0;
-    background:rgb(20 21 28 / .98);
-    box-shadow:var(--shadow-lg);
+    background:var(--color-background);
+    box-shadow:24px 0 70px rgb(0 0 0 / .72);
     animation:sidebar-in var(--motion-slow) var(--easing-standard) both;
+  }
+  .shell:not(.sidebar-hidden) aside::before{
+    content:"";
+    position:absolute;
+    inset:0;
+    z-index:-1;
+    border-right:1px solid rgb(119 242 195 / .14);
+    background:
+      radial-gradient(circle at 28% -8%,rgb(119 242 195 / .14),transparent 42%),
+      linear-gradient(180deg,#10151b,#07090d 62%,#050708);
   }
   .sidebar-backdrop{
     position:fixed;
     inset:0;
-    z-index:35;
+    z-index:50;
     display:block;
     width:100%;
     height:100%;
@@ -1052,10 +1065,19 @@ pre{
     padding:0;
     border:0;
     border-radius:0;
-    background:rgb(0 0 0 / .64);
-    backdrop-filter:blur(3px);
-    -webkit-backdrop-filter:blur(3px);
+    background:rgb(0 0 0 / .72);
+    backdrop-filter:none;
+    -webkit-backdrop-filter:none;
   }
+  .brandrow{
+    background:rgb(255 255 255 / .045);
+  }
+  .lockmark{
+    background:linear-gradient(135deg,var(--color-primary),var(--color-primary-hover));
+  }
+  .lockmark svg{fill:#08100f}
+  .lockmark .lockhole{fill:#08100f}
+  .lockmark .lockslot{stroke:#08100f}
   .navgroups{
     display:flex;
     flex-direction:column;
