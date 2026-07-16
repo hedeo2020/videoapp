@@ -434,12 +434,17 @@ body{
 }
 
 aside{
-  position:sticky;
+  position:fixed;
   top:0;
+  left:0;
+  bottom:0;
+  z-index:40;
   height:100vh;
+  width:286px;
   padding:24px 18px;
   border-right:var(--border-width) solid var(--color-border);
   background:linear-gradient(180deg,rgb(20 21 28 / .96),rgb(10 11 15 / .98));
+  overflow:hidden;
 }
 
 .brandrow{
@@ -473,7 +478,45 @@ aside{
 .lockmark .lockhole{fill:#fff}
 .lockmark .lockslot{stroke:#fff}
 
-nav{gap:6px}
+.navgroups{
+  flex:1 1 auto;
+  display:flex;
+  flex-direction:column;
+  gap:var(--space-4);
+  min-height:0;
+  overflow:auto;
+  padding:2px 4px 12px 0;
+  scrollbar-width:thin;
+  scrollbar-color:var(--color-border-strong) transparent;
+}
+
+.navgroups::-webkit-scrollbar{width:8px}
+.navgroups::-webkit-scrollbar-thumb{
+  border-radius:var(--radius-full);
+  background:var(--color-border-strong);
+}
+
+.navgroup{
+  display:grid;
+  gap:var(--space-2);
+}
+
+.navgroup>b{
+  padding:0 10px;
+  color:var(--color-text-muted);
+  font-family:var(--font-display);
+  font-size:.675rem;
+  font-weight:500;
+  letter-spacing:.11em;
+  line-height:1.2;
+  text-transform:uppercase;
+}
+
+.navgroup>div{
+  display:grid;
+  gap:6px;
+}
+
 nav button{
   min-height:40px;
   padding:0 14px;
@@ -511,7 +554,8 @@ nav button.active{
 }
 
 .operator{
-  margin-top:20px;
+  flex:0 0 auto;
+  margin-top:14px;
   border-top:var(--border-width) solid var(--color-border);
 }
 
@@ -930,12 +974,34 @@ pre{
   .shell{display:block}
   .shell:not(.sidebar-hidden) aside{
     position:sticky;
+    width:100%;
+    bottom:auto;
     height:auto;
     max-height:48vh;
     padding:12px;
     border-right:0;
     border-bottom:var(--border-width) solid var(--color-border);
     background:rgb(20 21 28 / .98);
+  }
+  .navgroups{
+    display:flex;
+    flex-direction:row;
+    gap:var(--space-3);
+    overflow-x:auto;
+    overflow-y:hidden;
+    padding:4px 2px 8px;
+  }
+  .navgroup{
+    flex:0 0 auto;
+    min-width:max-content;
+  }
+  .navgroup>b{
+    display:block;
+    padding:0 12px 4px;
+  }
+  .navgroup>div{
+    display:flex;
+    gap:8px;
   }
   nav button{border-radius:var(--radius-full)}
   main{max-width:none;padding:16px 12px 36px}

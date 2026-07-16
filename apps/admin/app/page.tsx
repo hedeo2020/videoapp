@@ -4,8 +4,15 @@ import { DragEvent, FormEvent, MouseEvent, useEffect, useMemo, useRef, useState 
 import { animate, stagger } from "animejs";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1";
-const nav = ["Overview", "Catalog", "Videos", "Video Editor", "File Manager", "Storage", "Series", "Uploads", "Processing", "Collections", "Users", "Device Sessions", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Activity", "Trash", "Audit logs", "Security", "Settings"] as const;
+const nav = ["Overview", "Catalog", "Collections", "Videos", "Series", "Uploads", "Video Editor", "Processing", "File Manager", "Storage", "Users", "Device Sessions", "Messages", "Notifications", "API Tokens", "Playback sessions", "Watermark Trace", "Backup & Restore", "Activity", "Trash", "Audit logs", "Security", "Settings"] as const;
 type Tab = (typeof nav)[number];
+const navGroups: { label: string; items: readonly Tab[] }[] = [
+  { label: "Workspace", items: ["Overview", "Catalog", "Collections"] },
+  { label: "Media library", items: ["Videos", "Series", "Uploads", "Video Editor", "Processing", "File Manager", "Storage"] },
+  { label: "People", items: ["Users", "Device Sessions", "Messages", "Notifications"] },
+  { label: "Access & trace", items: ["API Tokens", "Playback sessions", "Watermark Trace"] },
+  { label: "Operations", items: ["Backup & Restore", "Activity", "Trash", "Audit logs", "Security", "Settings"] },
+];
 type Admin = { id: string; displayName: string; email: string; role: string };
 type RecordItem = Record<string, unknown>;
 
@@ -821,10 +828,17 @@ function Dashboard({ admin }: { admin: Admin }) {
     <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
       <aside>
         <div className="brandrow"><div className="brand"><SecureLogo /> SecureStream</div><button className="sidehide" onClick={(event) => { animatePress(event); setSidebarHidden(true); }} title="Hide admin panel">‹</button></div>
-        <nav>{nav.map((item) => {
-          const badge = item === "Messages" ? unreadMessages : 0;
-          return <button className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); }}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
-        })}</nav>
+        <nav className="navgroups">{navGroups.map((group) => (
+          <section className="navgroup" key={group.label} aria-label={group.label}>
+            <b>{group.label}</b>
+            <div>
+              {group.items.map((item) => {
+                const badge = item === "Messages" ? unreadMessages : 0;
+                return <button className={item === active ? "active" : ""} key={item} onClick={(event) => { animatePress(event); setActive(item); }}><span>{item}</span>{badge > 0 && <b className="navbadge">{badge > 99 ? "99+" : badge}</b>}</button>;
+              })}
+            </div>
+          </section>
+        ))}</nav>
         <div className="operator"><span>{admin.displayName.slice(0, 2).toUpperCase()}</span><div><b>{admin.displayName}</b><small>{admin.role.replace("_", " ").toLowerCase()}</small></div></div>
       </aside>
       <main ref={mainRef}>
