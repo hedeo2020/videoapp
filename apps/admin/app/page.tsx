@@ -75,7 +75,13 @@ export default function App() {
         <p>Validating secure session</p>
       </div>
     );
-  return admin ? <Dashboard admin={admin} /> : <Login onLogin={setAdmin} />;
+  function clearAdminSession() {
+    sessionStorage.removeItem("ss_csrf");
+    sessionStorage.removeItem("ss_admin_access");
+    setAdmin(null);
+  }
+
+  return admin ? <Dashboard admin={admin} onLogout={clearAdminSession} /> : <Login onLogin={setAdmin} />;
 }
 
 function SecureLogo() {
@@ -157,7 +163,7 @@ function Login({ onLogin }: { onLogin: (admin: Admin) => void }) {
   );
 }
 
-function Dashboard({ admin }: { admin: Admin }) {
+function Dashboard({ admin, onLogout }: { admin: Admin; onLogout: () => void }) {
   const [active, setActive] = useState<Tab>("Overview");
   const [data, setData] = useState<Record<string, unknown>>({});
   const [sidebarHidden, setSidebarHidden] = useState(false);
@@ -1088,6 +1094,24 @@ function Dashboard({ admin }: { admin: Admin }) {
     });
   }
 
+  async function logoutAdmin(event?: MouseEvent<HTMLButtonElement>) {
+    if (event) animatePress(event);
+    setLoading(true);
+    setNotice("");
+    try {
+      await fetch(`${API}/admin/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+        headers: csrfHeaders(),
+      });
+    } catch {
+      // Local cleanup still matters if the network is unavailable or the server already expired the cookie.
+    } finally {
+      setLoading(false);
+      onLogout();
+    }
+  }
+
   return (
     <div className={`shell ${sidebarHidden ? "sidebar-hidden" : ""}`}>
       {!sidebarHidden && (
@@ -1175,6 +1199,15 @@ function Dashboard({ admin }: { admin: Admin }) {
             <b>{admin.displayName}</b>
             <small>{admin.role.replace("_", " ").toLowerCase()}</small>
           </div>
+          <button
+            type="button"
+            className="operator-logout"
+            onClick={logoutAdmin}
+            disabled={loading}
+            title="Log out of this admin session"
+          >
+            Log out
+          </button>
         </div>
       </aside>
       <main ref={mainRef} id="admin-content">
@@ -1223,6 +1256,9 @@ function Dashboard({ admin }: { admin: Admin }) {
               }}
             >
               + Upload
+            </button>
+            <button type="button" className="danger-ghost" onClick={logoutAdmin} disabled={loading}>
+              Log out
             </button>
           </div>
         </header>

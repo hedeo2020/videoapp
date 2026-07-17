@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.People
@@ -135,6 +136,13 @@ fun AdminDashboardScreen(
                 actions = {
                     IconButton(onClick = { viewModel.loadAdminDashboard(silent = true) }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "Refresh", tint = SecureMintAccent)
+                    }
+                    IconButton(onClick = { viewModel.logout() }) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Logout,
+                            contentDescription = "Log out",
+                            tint = SecureMintAccent
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = SecureDarkBackground)

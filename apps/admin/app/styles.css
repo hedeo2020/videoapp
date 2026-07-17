@@ -88,6 +88,17 @@ nav button.active {
   color: var(--muted);
   margin-top: 4px;
 }
+
+.operator-logout {
+  margin-left: auto;
+  align-self: center;
+  min-height: 34px;
+  padding: 7px 10px;
+  border-color: rgb(255 58 92 / 0.32);
+  background: rgb(255 58 92 / 0.1);
+  color: #ffb8c5;
+  white-space: nowrap;
+}
 main {
   padding: 40px 4vw;
   max-width: 1500px;
@@ -2166,6 +2177,24 @@ button.danger,
 button.danger:hover {
   border-color: var(--color-danger);
   background: rgb(255 58 92 / 0.2);
+}
+
+.danger-ghost,
+button.danger-ghost,
+.actions .danger-ghost,
+.operator-logout {
+  border-color: rgb(255 58 92 / 0.34);
+  background: rgb(255 58 92 / 0.1);
+  color: #ffb8c5;
+}
+
+.danger-ghost:hover,
+button.danger-ghost:hover,
+.actions .danger-ghost:hover,
+.operator-logout:hover {
+  border-color: var(--color-danger);
+  background: rgb(255 58 92 / 0.2);
+  color: #fff;
 }
 
 .actions {

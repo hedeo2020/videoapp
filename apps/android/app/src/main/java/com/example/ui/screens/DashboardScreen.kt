@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -120,6 +121,16 @@ fun DashboardScreen(
                                 tint = SecureMintAccent
                             )
                         }
+                    }
+                    IconButton(
+                        onClick = { viewModel.logout() },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.Logout,
+                            contentDescription = "Log out",
+                            tint = SecureMintAccent
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
