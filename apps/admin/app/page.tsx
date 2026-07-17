@@ -250,6 +250,24 @@ function Dashboard({ admin }: { admin: Admin }) {
     }
   }
 
+  async function loadMorePage(key: "playback" | "audit", path: string) {
+    const cursor = nextCursor(data[key]);
+    if (!cursor) return;
+    setLoading(true);
+    setNotice("");
+    try {
+      const payload = await apiGet(`${path}?cursor=${encodeURIComponent(cursor)}`);
+      setData((current) => ({
+        ...current,
+        [key]: mergePaginated(current[key], payload),
+      }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load more records.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     void load(active);
   }, [active]);
@@ -1328,7 +1346,14 @@ function Dashboard({ admin }: { admin: Admin }) {
             onRevoke={revokeApiToken}
           />
         )}
-        {active === "Playback sessions" && <PlaybackPanel rows={asArray(data.playback)} />}
+        {active === "Playback sessions" && (
+          <PlaybackPanel
+            rows={asArray(data.playback)}
+            hasMore={Boolean(nextCursor(data.playback))}
+            loading={loading}
+            onLoadMore={() => loadMorePage("playback", "/admin/playback-sessions")}
+          />
+        )}
         {active === "Watermark Trace" && <WatermarkTracePanel rows={asArray(data.playback)} />}
         {active === "Backup & Restore" && (
           <BackupPanel
@@ -1346,7 +1371,13 @@ function Dashboard({ admin }: { admin: Admin }) {
           <TrashPanel trash={data.trash as RecordItem | undefined} loading={loading} onAction={trashAction} />
         )}
         {active === "Audit logs" && (
-          <TablePanel rows={asArray(data.audit)} columns={["action", "targetType", "targetId", "createdAt"]} />
+          <TablePanel
+            rows={asArray(data.audit)}
+            columns={["action", "targetType", "targetId", "createdAt"]}
+            hasMore={Boolean(nextCursor(data.audit))}
+            loading={loading}
+            onLoadMore={() => loadMorePage("audit", "/admin/audit-logs")}
+          />
         )}
         {active === "Security" && (
           <TablePanel rows={asArray(data.security)} columns={["kind", "severity", "userId", "createdAt"]} />
@@ -3166,7 +3197,17 @@ function SeriesPanel({ series }: { series: RecordItem[] }) {
   );
 }
 
-function PlaybackPanel({ rows }: { rows: RecordItem[] }) {
+function PlaybackPanel({
+  rows,
+  hasMore,
+  loading,
+  onLoadMore,
+}: {
+  rows: RecordItem[];
+  hasMore?: boolean;
+  loading?: boolean;
+  onLoadMore?: () => void;
+}) {
   return (
     <article className="panel">
       <div className="panelhead">
@@ -3189,6 +3230,11 @@ function PlaybackPanel({ rows }: { rows: RecordItem[] }) {
           </div>
         ))}
       </div>
+      {hasMore && (
+        <button type="button" className="ghost" disabled={loading} onClick={onLoadMore}>
+          {loading ? "Loading..." : "Load more sessions"}
+        </button>
+      )}
     </article>
   );
 }
@@ -3606,7 +3652,19 @@ function TrashPanel({
   );
 }
 
-function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }) {
+function TablePanel({
+  rows,
+  columns,
+  hasMore,
+  loading,
+  onLoadMore,
+}: {
+  rows: RecordItem[];
+  columns: string[];
+  hasMore?: boolean;
+  loading?: boolean;
+  onLoadMore?: () => void;
+}) {
   return (
     <article className="panel tablewrap">
       <table>
@@ -3627,6 +3685,11 @@ function TablePanel({ rows, columns }: { rows: RecordItem[]; columns: string[] }
           ))}
         </tbody>
       </table>
+      {hasMore && (
+        <button type="button" className="ghost" disabled={loading} onClick={onLoadMore}>
+          {loading ? "Loading..." : "Load more"}
+        </button>
+      )}
     </article>
   );
 }
@@ -3930,7 +3993,21 @@ function userPayload(formData: FormData, requirePassword: boolean) {
   return payload;
 }
 function asArray(value: unknown): RecordItem[] {
-  return Array.isArray(value) ? (value as RecordItem[]) : [];
+  if (Array.isArray(value)) return value as RecordItem[];
+  if (value && typeof value === "object" && Array.isArray((value as RecordItem).items))
+    return (value as { items: RecordItem[] }).items;
+  return [];
+}
+function nextCursor(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const cursor = (value as RecordItem).nextCursor;
+  return typeof cursor === "string" && cursor ? cursor : null;
+}
+function mergePaginated(current: unknown, payload: unknown) {
+  return {
+    items: [...asArray(current), ...asArray(payload)],
+    nextCursor: nextCursor(payload),
+  };
 }
 function firstAsset(movie: RecordItem): RecordItem | null {
   return asArray(movie.assets)[0] ?? null;

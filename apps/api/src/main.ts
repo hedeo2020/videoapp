@@ -19,6 +19,7 @@ import { z } from "zod";
 import { isAdminRole, issueSession, publicUser, rotateSession, verifyPasswordAndTrack } from "./auth.js";
 import { type CatalogCard, isCurrentlyAvailable, movieHasReadyAsset, toMovieCard, toSeriesCard } from "./catalog.js";
 import { config } from "./config.js";
+import { requestLogSerializer } from "./logging.js";
 import { parseCompletedTranscodeResult, shouldMarkJobFailed } from "./processing.js";
 import { hasPermission } from "./rbac.js";
 import {
@@ -45,6 +46,9 @@ const app = Fastify({
       "body.token",
       "body.refreshToken",
     ],
+    serializers: {
+      req: requestLogSerializer,
+    },
   },
   genReqId: () => randomUUID(),
   trustProxy: config.NODE_ENV === "production" ? 1 : false,
@@ -79,6 +83,26 @@ const sessionContext = (req: FastifyRequest, deviceId: string) => ({
 });
 const sendError = (reply: FastifyReply, requestId: string, status: number, code: string, message: string) =>
   reply.code(status).send({ error: { code, message, requestId } });
+const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, label: string) => {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+const listPageQuery = z.object({ cursor: z.string().min(1).max(128).optional() });
+const listPageSize = 100;
+const pageFromRows = <T extends { id: string }>(rows: T[]) => {
+  const items = rows.slice(0, listPageSize);
+  return {
+    items,
+    nextCursor: rows.length > listPageSize ? (items.at(-1)?.id ?? null) : null,
+  };
+};
 const sendAccountStatus = (
   reply: FastifyReply,
   requestId: string,
@@ -1255,7 +1279,30 @@ async function runTrimEditorJob(job: EditorJob, inputPath: string, synopsis: str
   }
 }
 
-app.get("/health", async () => ({ status: "ok" }));
+app.get("/health", async (_req, reply) => {
+  const checks = {
+    database: "failed" as "ok" | "failed",
+    redis: "failed" as "ok" | "failed",
+  };
+  await Promise.all([
+    withTimeout(prisma.$queryRaw`SELECT 1`, 2000, "database health check")
+      .then(() => {
+        checks.database = "ok";
+      })
+      .catch(() => undefined),
+    withTimeout(
+      processingQueue.client.then((client) => (client as unknown as { ping: () => Promise<string> }).ping()),
+      2000,
+      "redis health check",
+    )
+      .then(() => {
+        checks.redis = "ok";
+      })
+      .catch(() => undefined),
+  ]);
+  if (checks.database === "ok" && checks.redis === "ok") return { status: "ok", checks };
+  return reply.code(503).send({ status: "degraded", checks });
+});
 app.get("/ready", async (_req, reply) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -1916,22 +1963,31 @@ app.post(
     return reply.code(201).send({ sent: users.length });
   },
 );
-app.get("/api/v1/admin/audit-logs", { preHandler: requirePermission("audit:read") }, async () =>
-  prisma.adminAuditLog.findMany({ orderBy: { createdAt: "desc" }, take: 100 }),
-);
+app.get("/api/v1/admin/audit-logs", { preHandler: requirePermission("audit:read") }, async (req) => {
+  const query = listPageQuery.parse(req.query);
+  const rows = await prisma.adminAuditLog.findMany({
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: listPageSize + 1,
+    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+  });
+  return pageFromRows(rows);
+});
 app.get("/api/v1/admin/security-events", { preHandler: requirePermission("settings:security") }, async () =>
   prisma.securityEvent.findMany({ orderBy: { createdAt: "desc" }, take: 100 }),
 );
-app.get("/api/v1/admin/playback-sessions", { preHandler: requirePermission("audit:read") }, async () =>
-  prisma.playbackSession.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 100,
+app.get("/api/v1/admin/playback-sessions", { preHandler: requirePermission("audit:read") }, async (req) => {
+  const query = listPageQuery.parse(req.query);
+  const rows = await prisma.playbackSession.findMany({
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: listPageSize + 1,
+    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
     include: {
       user: { select: { email: true, displayName: true } },
       videoAsset: { include: { movie: true, episode: true } },
     },
-  }),
-);
+  });
+  return pageFromRows(rows);
+});
 const settingsSnapshot = async () => ({
   registrationEnabled: config.REGISTRATION_ENABLED,
   maxConcurrentStreams: config.MAX_CONCURRENT_STREAMS,
@@ -3461,3 +3517,29 @@ void runScheduledBackupIfDue().catch((error) => app.log.error({ err: error }, "s
 
 setupProcessingQueueEvents();
 await app.listen({ host: "0.0.0.0", port: 4000 });
+
+let shutdownStarted = false;
+const shutdown = (signal: NodeJS.Signals) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  app.log.info({ signal }, "shutdown signal received");
+  const forceExit = setTimeout(() => {
+    app.log.warn({ signal }, "shutdown timed out; forcing exit");
+    process.exit(1);
+  }, 10_000);
+  forceExit.unref();
+  void app
+    .close()
+    .then(() => {
+      clearTimeout(forceExit);
+      app.log.info({ signal }, "shutdown complete");
+      process.exit(0);
+    })
+    .catch((error) => {
+      clearTimeout(forceExit);
+      app.log.error({ err: error, signal }, "shutdown failed");
+      process.exit(1);
+    });
+};
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);

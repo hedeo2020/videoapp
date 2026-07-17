@@ -15,6 +15,16 @@ const renditionList = z.preprocess(
     .min(1)
     .transform((heights) => [...new Set(heights)].sort((a, b) => a - b)),
 );
+const adminOriginList = z.preprocess(
+  (value) =>
+    typeof value === "string"
+      ? value
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean)
+      : value,
+  z.array(z.string().url()).min(1),
+);
 export const config = z
   .object({
     NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -23,7 +33,7 @@ export const config = z
     JWT_ACCESS_SECRET: z.string().min(32),
     JWT_REFRESH_SECRET: z.string().min(32),
     PLAYBACK_SIGNING_SECRET: z.string().min(32),
-    ADMIN_ORIGIN: z.string().url(),
+    ADMIN_ORIGIN: adminOriginList,
     REGISTRATION_ENABLED: z.coerce.boolean().default(true),
     ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().min(60).default(86400),
     REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).max(90).default(30),
