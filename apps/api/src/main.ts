@@ -10,6 +10,8 @@ import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
+import swagger from "@fastify/swagger";
+import swaggerUi from "@fastify/swagger-ui";
 import { type Prisma, PrismaClient, type Role } from "@prisma/client";
 import argon2 from "argon2";
 import { Job, Queue, QueueEvents } from "bullmq";
@@ -20,6 +22,7 @@ import { isAdminRole, issueSession, publicUser, rotateSession, verifyPasswordAnd
 import { type CatalogCard, isCurrentlyAvailable, movieHasReadyAsset, toMovieCard, toSeriesCard } from "./catalog.js";
 import { config } from "./config.js";
 import { requestLogSerializer } from "./logging.js";
+import { adminSecurity, bearerSecurity, openApiOptions, swaggerUiOptions } from "./openapi.js";
 import { parseCompletedTranscodeResult, shouldMarkJobFailed } from "./processing.js";
 import { hasPermission } from "./rbac.js";
 import {
@@ -53,6 +56,8 @@ const app = Fastify({
   genReqId: () => randomUUID(),
   trustProxy: config.NODE_ENV === "production" ? 1 : false,
 });
+await app.register(swagger, openApiOptions);
+await app.register(swaggerUi, swaggerUiOptions);
 await app.register(helmet, { global: true });
 await app.register(cors, {
   origin: config.ADMIN_ORIGIN,
@@ -941,7 +946,11 @@ const setupProcessingQueueEvents = () => {
       app.log.error({ err: error, jobId }, "failed to apply completed transcode result");
       const job = await Job.fromId(processingQueue, jobId).catch(() => undefined);
       const assetId = typeof job?.data?.assetId === "string" ? job.data.assetId : undefined;
-      if (assetId) await markVideoAssetTranscodeFailed(assetId, error instanceof Error ? error.message : "Invalid transcode result");
+      if (assetId)
+        await markVideoAssetTranscodeFailed(
+          assetId,
+          error instanceof Error ? error.message : "Invalid transcode result",
+        );
     }
   });
   processingEvents.on("failed", async ({ jobId, failedReason }) => {
@@ -1279,31 +1288,41 @@ async function runTrimEditorJob(job: EditorJob, inputPath: string, synopsis: str
   }
 }
 
-app.get("/health", async (_req, reply) => {
-  const checks = {
-    database: "failed" as "ok" | "failed",
-    redis: "failed" as "ok" | "failed",
-  };
-  await Promise.all([
-    withTimeout(prisma.$queryRaw`SELECT 1`, 2000, "database health check")
-      .then(() => {
-        checks.database = "ok";
-      })
-      .catch(() => undefined),
-    withTimeout(
-      processingQueue.client.then((client) => (client as unknown as { ping: () => Promise<string> }).ping()),
-      2000,
-      "redis health check",
-    )
-      .then(() => {
-        checks.redis = "ok";
-      })
-      .catch(() => undefined),
-  ]);
-  if (checks.database === "ok" && checks.redis === "ok") return { status: "ok", checks };
-  return reply.code(503).send({ status: "degraded", checks });
-});
-app.get("/ready", async (_req, reply) => {
+app.get(
+  "/health",
+  {
+    schema: {
+      tags: ["health"],
+      summary: "Check API liveness and dependencies",
+      description: "Returns ok only when the API can reach both Postgres and Redis.",
+    },
+  },
+  async (_req, reply) => {
+    const checks = {
+      database: "failed" as "ok" | "failed",
+      redis: "failed" as "ok" | "failed",
+    };
+    await Promise.all([
+      withTimeout(prisma.$queryRaw`SELECT 1`, 2000, "database health check")
+        .then(() => {
+          checks.database = "ok";
+        })
+        .catch(() => undefined),
+      withTimeout(
+        processingQueue.client.then((client) => (client as unknown as { ping: () => Promise<string> }).ping()),
+        2000,
+        "redis health check",
+      )
+        .then(() => {
+          checks.redis = "ok";
+        })
+        .catch(() => undefined),
+    ]);
+    if (checks.database === "ok" && checks.redis === "ok") return { status: "ok", checks };
+    return reply.code(503).send({ status: "degraded", checks });
+  },
+);
+app.get("/ready", { schema: { tags: ["health"], summary: "Check database readiness" } }, async (_req, reply) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return { status: "ready" };
@@ -1314,7 +1333,10 @@ app.get("/ready", async (_req, reply) => {
 
 app.post(
   "/api/v1/auth/register",
-  { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
+  {
+    config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
+    schema: { tags: ["auth"], summary: "Register viewer account" },
+  },
   async (req, reply) => {
     if (!config.REGISTRATION_ENABLED)
       return sendError(reply, req.id, 403, "REGISTRATION_DISABLED", "Registration is currently unavailable");
@@ -1347,73 +1369,87 @@ app.post(
   },
 );
 
-app.post("/api/v1/auth/login", { config: { rateLimit: { max: 8, timeWindow: "15 minutes" } } }, async (req, reply) => {
-  const body = z
-    .object({ email: z.string().email(), password: z.string(), deviceId: z.string().min(8) })
-    .parse(req.body);
-  const user = await verifyPasswordAndTrack(prisma, body.email, body.password);
-  if (!user) {
-    const existing = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() }, select: { id: true } });
-    await prisma.securityEvent.create({
-      data: { userId: existing?.id, kind: "LOGIN_FAILED", severity: "MEDIUM", metadata: { ipHash: ipHash(req) } },
-    });
-    return existing
-      ? sendError(reply, req.id, 401, "INVALID_CREDENTIALS", "Email or password is incorrect")
-      : sendAccountStatus(
-          reply,
-          req.id,
-          404,
-          "ACCOUNT_NOT_FOUND",
-          "DELETED",
-          "This account no longer exists. Please contact the administrator.",
-        );
-  }
-  if (user.deletedAt)
-    return sendAccountStatus(
-      reply,
-      req.id,
-      403,
-      "ACCOUNT_INACTIVE",
-      "DELETED",
-      user.deletedReason ?? "This account was deleted by the administrator.",
-    );
-  if (user.status !== "ACTIVE") {
-    await prisma.securityEvent.create({
-      data: {
-        userId: user.id,
-        kind: "LOGIN_BLOCKED",
-        severity: "MEDIUM",
-        metadata: { ipHash: ipHash(req), status: user.status },
-      },
-    });
-    const message =
-      user.status === "SUSPENDED"
-        ? "Your account is suspended. Please contact the administrator."
-        : "Your account is disabled. Please contact the administrator.";
-    return sendAccountStatus(reply, req.id, 403, "ACCOUNT_INACTIVE", user.status, message);
-  }
-  const maintenance = await maintenanceSettings();
-  if (maintenance.enabled && !isAdminRole(user.role))
-    return sendAccountStatus(reply, req.id, 503, "MAINTENANCE_MODE", "MAINTENANCE", maintenance.message);
-  const tokens = await issueSession(prisma, user, sessionContext(req, body.deviceId));
-  await prisma.securityEvent.create({ data: { userId: user.id, kind: "LOGIN_SUCCEEDED", severity: "INFO" } });
-  return { ...tokens, user: publicUser(user) };
-});
+app.post(
+  "/api/v1/auth/login",
+  {
+    config: { rateLimit: { max: 8, timeWindow: "15 minutes" } },
+    schema: { tags: ["auth"], summary: "Login" },
+  },
+  async (req, reply) => {
+    const body = z
+      .object({ email: z.string().email(), password: z.string(), deviceId: z.string().min(8) })
+      .parse(req.body);
+    const user = await verifyPasswordAndTrack(prisma, body.email, body.password);
+    if (!user) {
+      const existing = await prisma.user.findUnique({
+        where: { email: body.email.toLowerCase() },
+        select: { id: true },
+      });
+      await prisma.securityEvent.create({
+        data: { userId: existing?.id, kind: "LOGIN_FAILED", severity: "MEDIUM", metadata: { ipHash: ipHash(req) } },
+      });
+      return existing
+        ? sendError(reply, req.id, 401, "INVALID_CREDENTIALS", "Email or password is incorrect")
+        : sendAccountStatus(
+            reply,
+            req.id,
+            404,
+            "ACCOUNT_NOT_FOUND",
+            "DELETED",
+            "This account no longer exists. Please contact the administrator.",
+          );
+    }
+    if (user.deletedAt)
+      return sendAccountStatus(
+        reply,
+        req.id,
+        403,
+        "ACCOUNT_INACTIVE",
+        "DELETED",
+        user.deletedReason ?? "This account was deleted by the administrator.",
+      );
+    if (user.status !== "ACTIVE") {
+      await prisma.securityEvent.create({
+        data: {
+          userId: user.id,
+          kind: "LOGIN_BLOCKED",
+          severity: "MEDIUM",
+          metadata: { ipHash: ipHash(req), status: user.status },
+        },
+      });
+      const message =
+        user.status === "SUSPENDED"
+          ? "Your account is suspended. Please contact the administrator."
+          : "Your account is disabled. Please contact the administrator.";
+      return sendAccountStatus(reply, req.id, 403, "ACCOUNT_INACTIVE", user.status, message);
+    }
+    const maintenance = await maintenanceSettings();
+    if (maintenance.enabled && !isAdminRole(user.role))
+      return sendAccountStatus(reply, req.id, 503, "MAINTENANCE_MODE", "MAINTENANCE", maintenance.message);
+    const tokens = await issueSession(prisma, user, sessionContext(req, body.deviceId));
+    await prisma.securityEvent.create({ data: { userId: user.id, kind: "LOGIN_SUCCEEDED", severity: "INFO" } });
+    return { ...tokens, user: publicUser(user) };
+  },
+);
 
-app.post("/api/v1/auth/refresh", async (req, reply) => {
-  const body = z.object({ refreshToken: z.string().min(32), deviceId: z.string().min(8) }).parse(req.body);
-  const result = await rotateSession(prisma, body.refreshToken, sessionContext(req, body.deviceId));
-  if (result.kind !== "ok")
-    return sendError(
-      reply,
-      req.id,
-      401,
-      result.kind === "reuse" ? "TOKEN_REUSE" : "REFRESH_INVALID",
-      "Session is no longer valid",
-    );
-  return result;
-});
-app.post("/api/v1/auth/logout", async (req, reply) => {
+app.post(
+  "/api/v1/auth/refresh",
+  { schema: { tags: ["auth"], summary: "Refresh access token" } },
+  async (req, reply) => {
+    const body = z.object({ refreshToken: z.string().min(32), deviceId: z.string().min(8) }).parse(req.body);
+    const result = await rotateSession(prisma, body.refreshToken, sessionContext(req, body.deviceId));
+    if (result.kind !== "ok")
+      return sendError(
+        reply,
+        req.id,
+        401,
+        result.kind === "reuse" ? "TOKEN_REUSE" : "REFRESH_INVALID",
+        "Session is no longer valid",
+      );
+    return result;
+  },
+);
+app.post("/api/v1/auth/logout", { schema: { tags: ["auth"], summary: "Logout" } }, async (req, reply) => {
   const body = z.object({ refreshToken: z.string().min(32) }).parse(req.body);
   await prisma.refreshSession.updateMany({
     where: { tokenHash: hashToken(body.refreshToken), revokedAt: null },
@@ -1424,7 +1460,10 @@ app.post("/api/v1/auth/logout", async (req, reply) => {
 
 app.post(
   "/api/v1/auth/forgot-password",
-  { config: { rateLimit: { max: 3, timeWindow: "15 minutes" } } },
+  {
+    config: { rateLimit: { max: 3, timeWindow: "15 minutes" } },
+    schema: { tags: ["auth"], summary: "Request password reset" },
+  },
   async (req) => {
     const body = z.object({ email: z.string().email() }).parse(req.body);
     const user = await prisma.user.findUnique({ where: { email: body.email.toLowerCase() } });
@@ -1445,29 +1484,33 @@ app.post(
     };
   },
 );
-app.post("/api/v1/auth/reset-password", async (req, reply) => {
-  const body = z.object({ token: z.string().min(32), password: z.string().min(12).max(128) }).parse(req.body);
-  const record = await prisma.passwordResetToken.findUnique({ where: { tokenHash: hashToken(body.token) } });
-  if (!record || record.usedAt || record.expiresAt <= new Date())
-    return sendError(reply, req.id, 400, "RESET_INVALID", "Reset token is invalid or expired");
-  await prisma.$transaction([
-    prisma.user.update({
-      where: { id: record.userId },
-      data: {
-        passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
-        failedLoginCount: 0,
-        lockedUntil: null,
-      },
-    }),
-    prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
-    prisma.refreshSession.updateMany({
-      where: { userId: record.userId, revokedAt: null },
-      data: { revokedAt: new Date() },
-    }),
-  ]);
-  return { message: "Password updated" };
-});
-app.post("/api/v1/auth/verify-email", async (req, reply) => {
+app.post(
+  "/api/v1/auth/reset-password",
+  { schema: { tags: ["auth"], summary: "Reset password" } },
+  async (req, reply) => {
+    const body = z.object({ token: z.string().min(32), password: z.string().min(12).max(128) }).parse(req.body);
+    const record = await prisma.passwordResetToken.findUnique({ where: { tokenHash: hashToken(body.token) } });
+    if (!record || record.usedAt || record.expiresAt <= new Date())
+      return sendError(reply, req.id, 400, "RESET_INVALID", "Reset token is invalid or expired");
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: record.userId },
+        data: {
+          passwordHash: await argon2.hash(body.password, { type: argon2.argon2id }),
+          failedLoginCount: 0,
+          lockedUntil: null,
+        },
+      }),
+      prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
+      prisma.refreshSession.updateMany({
+        where: { userId: record.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+    return { message: "Password updated" };
+  },
+);
+app.post("/api/v1/auth/verify-email", { schema: { tags: ["auth"], summary: "Verify email" } }, async (req, reply) => {
   const body = z.object({ token: z.string().min(32) }).parse(req.body);
   const record = await prisma.emailVerificationToken.findUnique({ where: { tokenHash: hashToken(body.token) } });
   if (!record || record.usedAt || record.expiresAt <= new Date())
@@ -1479,41 +1522,57 @@ app.post("/api/v1/auth/verify-email", async (req, reply) => {
   return { message: "Email verified" };
 });
 
-app.get("/api/v1/account/me", { preHandler: authenticate }, async (req) =>
-  publicUser(await prisma.user.findUniqueOrThrow({ where: { id: (req as AuthRequest).auth.sub } })),
+app.get(
+  "/api/v1/account/me",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "Get current account", security: bearerSecurity } },
+  async (req) => publicUser(await prisma.user.findUniqueOrThrow({ where: { id: (req as AuthRequest).auth.sub } })),
 );
-app.patch("/api/v1/account/me", { preHandler: authenticate }, async (req) => {
-  const auth = (req as AuthRequest).auth;
-  const body = z
-    .object({ displayName: z.string().min(2).max(80).optional(), password: z.string().min(12).max(128).optional() })
-    .parse(req.body);
-  const user = await prisma.user.update({
-    where: { id: auth.sub },
-    data: {
-      displayName: body.displayName,
-      passwordHash: body.password ? await argon2.hash(body.password, { type: argon2.argon2id }) : undefined,
-    },
-  });
-  return publicUser(user);
-});
-app.get("/api/v1/account/dashboard", { preHandler: authenticate }, async (req) => {
-  const userId = (req as AuthRequest).auth.sub;
-  const [user, unreadNotifications, conversation] = await Promise.all([
-    prisma.user.findUniqueOrThrow({ where: { id: userId } }),
-    prisma.userNotification.count({ where: { userId, readAt: null } }),
-    supportConversationFor(userId),
-  ]);
-  const unreadMessages = await prisma.supportMessage.count({
-    where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
-  });
-  return { user: publicUser(user), unreadNotifications, unreadMessages };
-});
-app.get("/api/v1/account/sessions", { preHandler: authenticate }, async (req) =>
-  prisma.refreshSession.findMany({
-    where: { userId: (req as AuthRequest).auth.sub, revokedAt: null, expiresAt: { gt: new Date() } },
-    select: { id: true, deviceId: true, userAgent: true, createdAt: true, lastUsedAt: true, expiresAt: true },
-    orderBy: { lastUsedAt: "desc" },
-  }),
+app.patch(
+  "/api/v1/account/me",
+  {
+    preHandler: authenticate,
+    schema: { tags: ["viewer"], summary: "Update current account", security: bearerSecurity },
+  },
+  async (req) => {
+    const auth = (req as AuthRequest).auth;
+    const body = z
+      .object({ displayName: z.string().min(2).max(80).optional(), password: z.string().min(12).max(128).optional() })
+      .parse(req.body);
+    const user = await prisma.user.update({
+      where: { id: auth.sub },
+      data: {
+        displayName: body.displayName,
+        passwordHash: body.password ? await argon2.hash(body.password, { type: argon2.argon2id }) : undefined,
+      },
+    });
+    return publicUser(user);
+  },
+);
+app.get(
+  "/api/v1/account/dashboard",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "Get viewer dashboard", security: bearerSecurity } },
+  async (req) => {
+    const userId = (req as AuthRequest).auth.sub;
+    const [user, unreadNotifications, conversation] = await Promise.all([
+      prisma.user.findUniqueOrThrow({ where: { id: userId } }),
+      prisma.userNotification.count({ where: { userId, readAt: null } }),
+      supportConversationFor(userId),
+    ]);
+    const unreadMessages = await prisma.supportMessage.count({
+      where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
+    });
+    return { user: publicUser(user), unreadNotifications, unreadMessages };
+  },
+);
+app.get(
+  "/api/v1/account/sessions",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "List viewer sessions", security: bearerSecurity } },
+  async (req) =>
+    prisma.refreshSession.findMany({
+      where: { userId: (req as AuthRequest).auth.sub, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true, deviceId: true, userAgent: true, createdAt: true, lastUsedAt: true, expiresAt: true },
+      orderBy: { lastUsedAt: "desc" },
+    }),
 );
 app.delete("/api/v1/account/sessions/:id", { preHandler: authenticate }, async (req, reply) => {
   const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
@@ -1530,24 +1589,35 @@ app.delete("/api/v1/account/sessions", { preHandler: authenticate }, async (req,
   });
   return reply.code(204).send();
 });
-app.get("/api/v1/messages", { preHandler: authenticate }, async (req) => {
-  const userId = (req as AuthRequest).auth.sub;
-  const conversation = await supportConversationFor(userId);
-  const messages = await prisma.supportMessage.findMany({
-    where: { conversationId: conversation.id },
-    include: { sender: { select: { id: true, displayName: true, role: true } } },
-    orderBy: { createdAt: "asc" },
-    take: 100,
-  });
-  await prisma.supportMessage.updateMany({
-    where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
-    data: { readAt: new Date() },
-  });
-  return { conversationId: conversation.id, messages, items: messages };
-});
+app.get(
+  "/api/v1/messages",
+  {
+    preHandler: authenticate,
+    schema: { tags: ["viewer"], summary: "List support messages", security: bearerSecurity },
+  },
+  async (req) => {
+    const userId = (req as AuthRequest).auth.sub;
+    const conversation = await supportConversationFor(userId);
+    const messages = await prisma.supportMessage.findMany({
+      where: { conversationId: conversation.id },
+      include: { sender: { select: { id: true, displayName: true, role: true } } },
+      orderBy: { createdAt: "asc" },
+      take: 100,
+    });
+    await prisma.supportMessage.updateMany({
+      where: { conversationId: conversation.id, senderUserId: { not: userId }, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return { conversationId: conversation.id, messages, items: messages };
+  },
+);
 app.post(
   "/api/v1/messages",
-  { preHandler: authenticate, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+  {
+    preHandler: authenticate,
+    config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    schema: { tags: ["viewer"], summary: "Send support message", security: bearerSecurity },
+  },
   async (req, reply) => {
     const userId = (req as AuthRequest).auth.sub;
     const body = z.object({ body: z.string().min(1).max(5000) }).parse(req.body);
@@ -1560,12 +1630,15 @@ app.post(
     return reply.code(201).send(message);
   },
 );
-app.get("/api/v1/notifications", { preHandler: authenticate }, async (req) =>
-  prisma.userNotification.findMany({
-    where: { userId: (req as AuthRequest).auth.sub },
-    orderBy: { createdAt: "desc" },
-    take: 100,
-  }),
+app.get(
+  "/api/v1/notifications",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "List notifications", security: bearerSecurity } },
+  async (req) =>
+    prisma.userNotification.findMany({
+      where: { userId: (req as AuthRequest).auth.sub },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    }),
 );
 app.patch("/api/v1/notifications/:id/read", { preHandler: authenticate }, async (req, reply) => {
   const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
@@ -1586,7 +1659,10 @@ app.patch("/api/v1/notifications/read-all", { preHandler: authenticate }, async 
 
 app.post(
   "/api/v1/admin/auth/login",
-  { config: { rateLimit: { max: 6, timeWindow: "15 minutes" } } },
+  {
+    config: { rateLimit: { max: 6, timeWindow: "15 minutes" } },
+    schema: { tags: ["auth"], summary: "Admin login" },
+  },
   async (req, reply) => {
     const body = z
       .object({ email: z.string().email(), password: z.string(), deviceId: z.string().min(8) })
@@ -1963,31 +2039,45 @@ app.post(
     return reply.code(201).send({ sent: users.length });
   },
 );
-app.get("/api/v1/admin/audit-logs", { preHandler: requirePermission("audit:read") }, async (req) => {
-  const query = listPageQuery.parse(req.query);
-  const rows = await prisma.adminAuditLog.findMany({
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: listPageSize + 1,
-    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-  });
-  return pageFromRows(rows);
-});
+app.get(
+  "/api/v1/admin/audit-logs",
+  {
+    preHandler: requirePermission("audit:read"),
+    schema: { tags: ["admin"], summary: "List admin audit logs", security: adminSecurity },
+  },
+  async (req) => {
+    const query = listPageQuery.parse(req.query);
+    const rows = await prisma.adminAuditLog.findMany({
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: listPageSize + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+    });
+    return pageFromRows(rows);
+  },
+);
 app.get("/api/v1/admin/security-events", { preHandler: requirePermission("settings:security") }, async () =>
   prisma.securityEvent.findMany({ orderBy: { createdAt: "desc" }, take: 100 }),
 );
-app.get("/api/v1/admin/playback-sessions", { preHandler: requirePermission("audit:read") }, async (req) => {
-  const query = listPageQuery.parse(req.query);
-  const rows = await prisma.playbackSession.findMany({
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: listPageSize + 1,
-    ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-    include: {
-      user: { select: { email: true, displayName: true } },
-      videoAsset: { include: { movie: true, episode: true } },
-    },
-  });
-  return pageFromRows(rows);
-});
+app.get(
+  "/api/v1/admin/playback-sessions",
+  {
+    preHandler: requirePermission("audit:read"),
+    schema: { tags: ["admin"], summary: "List playback sessions", security: adminSecurity },
+  },
+  async (req) => {
+    const query = listPageQuery.parse(req.query);
+    const rows = await prisma.playbackSession.findMany({
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: listPageSize + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      include: {
+        user: { select: { email: true, displayName: true } },
+        videoAsset: { include: { movie: true, episode: true } },
+      },
+    });
+    return pageFromRows(rows);
+  },
+);
 const settingsSnapshot = async () => ({
   registrationEnabled: config.REGISTRATION_ENABLED,
   maxConcurrentStreams: config.MAX_CONCURRENT_STREAMS,
@@ -2003,11 +2093,18 @@ const settingsSnapshot = async () => ({
   storageWarningPercent: await getSetting("storageWarningPercent", 80),
   android: await androidUpdateSettings(),
 });
-app.get("/api/v1/app/config", async () => ({
+app.get("/api/v1/app/config", { schema: { tags: ["viewer"], summary: "Get app runtime config" } }, async () => ({
   maintenance: await maintenanceSettings(),
   android: await androidUpdateSettings(),
 }));
-app.get("/api/v1/admin/settings", { preHandler: requirePermission("settings:security") }, settingsSnapshot);
+app.get(
+  "/api/v1/admin/settings",
+  {
+    preHandler: requirePermission("settings:security"),
+    schema: { tags: ["admin"], summary: "Get admin settings", security: adminSecurity },
+  },
+  settingsSnapshot,
+);
 app.patch(
   "/api/v1/admin/settings",
   { preHandler: [requirePermission("settings:security"), requireCsrf] },
@@ -2185,47 +2282,54 @@ app.post(
     return reply.code(201).send(backup);
   },
 );
-app.get("/api/v1/admin/system-status", { preHandler: requirePermission("audit:read") }, async () => {
-  const memoryTotal = os.totalmem();
-  const memoryFree = os.freemem();
-  const cpus = os.cpus();
-  const loadAverage = os.loadavg();
-  const cpuCores = cpus.length || 1;
-  const cpuUsedPercent = Math.max(0, Math.min(100, Math.round(((loadAverage[0] ?? 0) / cpuCores) * 100)));
-  const storage = await statfs(storageRoot).catch(() => undefined);
-  const storageTotal = storage ? storage.blocks * storage.bsize : 0;
-  const storageFree = storage ? storage.bavail * storage.bsize : 0;
-  const network = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
-    (addresses ?? [])
-      .filter((address) => !address.internal)
-      .map((address) => ({ name, family: address.family, address: address.address, mac: address.mac })),
-  );
-  return {
-    checkedAt: new Date().toISOString(),
-    host: {
-      hostname: os.hostname(),
-      platform: os.platform(),
-      arch: os.arch(),
-      uptimeSeconds: Math.round(os.uptime()),
-      processUptimeSeconds: Math.round(process.uptime()),
-    },
-    cpu: { cores: cpuCores, loadAverage, usedPercent: cpuUsedPercent },
-    memory: {
-      totalBytes: memoryTotal,
-      freeBytes: memoryFree,
-      usedBytes: memoryTotal - memoryFree,
-      usedPercent: memoryTotal ? Math.round(((memoryTotal - memoryFree) / memoryTotal) * 100) : 0,
-    },
-    storage: {
-      path: storageRoot,
-      totalBytes: storageTotal,
-      freeBytes: storageFree,
-      usedBytes: Math.max(0, storageTotal - storageFree),
-      usedPercent: storageTotal ? Math.round(((storageTotal - storageFree) / storageTotal) * 100) : 0,
-    },
-    network: { interfaceCount: network.length, interfaces: network },
-  };
-});
+app.get(
+  "/api/v1/admin/system-status",
+  {
+    preHandler: requirePermission("audit:read"),
+    schema: { tags: ["admin"], summary: "Get system status", security: adminSecurity },
+  },
+  async () => {
+    const memoryTotal = os.totalmem();
+    const memoryFree = os.freemem();
+    const cpus = os.cpus();
+    const loadAverage = os.loadavg();
+    const cpuCores = cpus.length || 1;
+    const cpuUsedPercent = Math.max(0, Math.min(100, Math.round(((loadAverage[0] ?? 0) / cpuCores) * 100)));
+    const storage = await statfs(storageRoot).catch(() => undefined);
+    const storageTotal = storage ? storage.blocks * storage.bsize : 0;
+    const storageFree = storage ? storage.bavail * storage.bsize : 0;
+    const network = Object.entries(os.networkInterfaces()).flatMap(([name, addresses]) =>
+      (addresses ?? [])
+        .filter((address) => !address.internal)
+        .map((address) => ({ name, family: address.family, address: address.address, mac: address.mac })),
+    );
+    return {
+      checkedAt: new Date().toISOString(),
+      host: {
+        hostname: os.hostname(),
+        platform: os.platform(),
+        arch: os.arch(),
+        uptimeSeconds: Math.round(os.uptime()),
+        processUptimeSeconds: Math.round(process.uptime()),
+      },
+      cpu: { cores: cpuCores, loadAverage, usedPercent: cpuUsedPercent },
+      memory: {
+        totalBytes: memoryTotal,
+        freeBytes: memoryFree,
+        usedBytes: memoryTotal - memoryFree,
+        usedPercent: memoryTotal ? Math.round(((memoryTotal - memoryFree) / memoryTotal) * 100) : 0,
+      },
+      storage: {
+        path: storageRoot,
+        totalBytes: storageTotal,
+        freeBytes: storageFree,
+        usedBytes: Math.max(0, storageTotal - storageFree),
+        usedPercent: storageTotal ? Math.round(((storageTotal - storageFree) / storageTotal) * 100) : 0,
+      },
+      network: { interfaceCount: network.length, interfaces: network },
+    };
+  },
+);
 app.get("/api/v1/admin/activity", { preHandler: requirePermission("audit:read") }, async () => {
   const rows = await prisma.adminAuditLog.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
   const users = await prisma.user.findMany({
@@ -3092,140 +3196,159 @@ app.post(
     return asset;
   },
 );
-app.get("/api/v1/admin/processing/jobs", { preHandler: requirePermission("catalog:write") }, async () => ({
-  waiting: await processingQueue.getWaitingCount(),
-  active: await processingQueue.getActiveCount(),
-  failed: await processingQueue.getFailedCount(),
-  completed: await processingQueue.getCompletedCount(),
-}));
+app.get(
+  "/api/v1/admin/processing/jobs",
+  {
+    preHandler: requirePermission("catalog:write"),
+    schema: { tags: ["admin"], summary: "Get processing queue counts", security: adminSecurity },
+  },
+  async () => ({
+    waiting: await processingQueue.getWaitingCount(),
+    active: await processingQueue.getActiveCount(),
+    failed: await processingQueue.getFailedCount(),
+    completed: await processingQueue.getCompletedCount(),
+  }),
+);
 
-app.get("/api/v1/catalog", { preHandler: authenticate }, async (req) => {
-  const auth = (req as AuthRequest).auth;
-  const [scope, userDefault] = await Promise.all([
-    userAccessScope(auth.sub),
-    prisma.user.findUnique({ where: { id: auth.sub }, select: { defaultCollectionId: true } }),
-  ]);
-  const defaultCollectionId = userDefault?.defaultCollectionId ?? null;
-  const [collections, movies] = await Promise.all([
-    prisma.collection.findMany({
-      where: { published: true, ...(scope ? { id: { in: [...scope.collectionIds] } } : {}) },
-      orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }],
-      include: {
-        parent: true,
-        items: { orderBy: { sortOrder: "asc" }, include: { movie: { include: { assets: true } }, series: true } },
-      },
-    }),
-    prisma.movie.findMany({
-      where: { status: "PUBLISHED", deletedAt: null, ...(scope ? { id: { in: [...scope.movieIds] } } : {}) },
-      include: { assets: true },
-      orderBy: [{ featured: "desc" }, { updatedAt: "desc" }],
-      take: 50,
-    }),
-  ]);
-  await ensureMovieDurations([
-    ...(movies as MovieWithAssets[]),
-    ...(collections.flatMap((collection) =>
-      collection.items.map((item) => item.movie).filter(Boolean),
-    ) as MovieWithAssets[]),
-  ]);
-  const collectionRails = collections
-    .map((collection) => ({
-      id: collection.id,
-      name: collection.parent ? `${collection.parent.name} / ${collection.name}` : collection.name,
-      slug: collection.slug,
-      parentId: collection.parentId,
-      parentName: collection.parent?.name ?? null,
-      items: collection.items.flatMap<CatalogCard>((item) => {
-        if (
-          item.movie &&
-          !item.movie.deletedAt &&
-          (!scope || scope.movieIds.has(item.movie.id)) &&
-          item.movie.status === "PUBLISHED" &&
-          isCurrentlyAvailable(item.movie) &&
-          movieHasReadyAsset(item.movie)
-        )
-          return [toMovieCard(item.movie)];
-        if (item.series && item.series.status === "PUBLISHED") return [toSeriesCard(item.series)];
-        return [];
+app.get(
+  "/api/v1/catalog",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "Get viewer catalog", security: bearerSecurity } },
+  async (req) => {
+    const auth = (req as AuthRequest).auth;
+    const [scope, userDefault] = await Promise.all([
+      userAccessScope(auth.sub),
+      prisma.user.findUnique({ where: { id: auth.sub }, select: { defaultCollectionId: true } }),
+    ]);
+    const defaultCollectionId = userDefault?.defaultCollectionId ?? null;
+    const [collections, movies] = await Promise.all([
+      prisma.collection.findMany({
+        where: { published: true, ...(scope ? { id: { in: [...scope.collectionIds] } } : {}) },
+        orderBy: [{ parentId: "asc" }, { sortOrder: "asc" }],
+        include: {
+          parent: true,
+          items: { orderBy: { sortOrder: "asc" }, include: { movie: { include: { assets: true } }, series: true } },
+        },
       }),
-    }))
-    .filter((rail) => rail.items.length > 0);
-  const collectionMovieIds = new Set(
-    collectionRails.flatMap((rail) => rail.items.filter((item) => item.kind === "MOVIE").map((item) => item.id)),
-  );
-  const movieItems = movies
-    .filter((movie) => isCurrentlyAvailable(movie) && movieHasReadyAsset(movie) && !collectionMovieIds.has(movie.id))
-    .map(toMovieCard);
-  return {
-    defaultCollectionId,
-    rails: [
-      ...collectionRails,
-      ...(movieItems.length
-        ? [
-            {
-              id: "default-videos",
-              name: "Videos",
-              slug: "videos",
-              parentId: null,
-              parentName: null,
-              items: movieItems,
-            },
-          ]
-        : []),
-    ],
-  };
-});
-app.get("/api/v1/search", { preHandler: authenticate }, async (req) => {
-  const auth = (req as AuthRequest).auth;
-  const scope = await userAccessScope(auth.sub);
-  const q = z.object({ q: z.string().min(2).max(100), genre: z.string().optional() }).parse(req.query);
-  const [movies, collections] = await Promise.all([
-    prisma.movie.findMany({
-      where: {
-        status: "PUBLISHED",
-        deletedAt: null,
-        ...(scope ? { id: { in: [...scope.movieIds] } } : {}),
-        genres: q.genre ? { has: q.genre } : undefined,
-        OR: [
-          { title: { contains: q.q, mode: "insensitive" } },
-          { synopsis: { contains: q.q, mode: "insensitive" } },
-          { tags: { has: q.q } },
-        ],
-      },
-      include: { assets: true },
-      take: 30,
-    }),
-    prisma.collection.findMany({
-      where: {
-        published: true,
-        ...(scope ? { id: { in: [...scope.collectionIds] } } : {}),
-        OR: [{ name: { contains: q.q, mode: "insensitive" } }, { slug: { contains: q.q, mode: "insensitive" } }],
-      },
-      include: { items: { include: { movie: { include: { assets: true } } } } },
-      take: 10,
-    }),
-  ]);
-  const folderMovies = collections.flatMap((collection) =>
-    collection.items.flatMap((item) => (item.movie && !item.movie.deletedAt ? [item.movie] : [])),
-  );
-  const allMovies = [...movies, ...folderMovies].filter(
-    (movie, index, self) => self.findIndex((item) => item.id === movie.id) === index,
-  );
-  await ensureMovieDurations(allMovies as MovieWithAssets[]);
-  return allMovies
-    .filter(
-      (movie) =>
-        (!scope || scope.movieIds.has(movie.id)) &&
-        movie.status === "PUBLISHED" &&
-        !movie.deletedAt &&
-        isCurrentlyAvailable(movie) &&
-        movieHasReadyAsset(movie),
-    )
-    .map(toMovieCard);
-});
+      prisma.movie.findMany({
+        where: { status: "PUBLISHED", deletedAt: null, ...(scope ? { id: { in: [...scope.movieIds] } } : {}) },
+        include: { assets: true },
+        orderBy: [{ featured: "desc" }, { updatedAt: "desc" }],
+        take: 50,
+      }),
+    ]);
+    await ensureMovieDurations([
+      ...(movies as MovieWithAssets[]),
+      ...(collections.flatMap((collection) =>
+        collection.items.map((item) => item.movie).filter(Boolean),
+      ) as MovieWithAssets[]),
+    ]);
+    const collectionRails = collections
+      .map((collection) => ({
+        id: collection.id,
+        name: collection.parent ? `${collection.parent.name} / ${collection.name}` : collection.name,
+        slug: collection.slug,
+        parentId: collection.parentId,
+        parentName: collection.parent?.name ?? null,
+        items: collection.items.flatMap<CatalogCard>((item) => {
+          if (
+            item.movie &&
+            !item.movie.deletedAt &&
+            (!scope || scope.movieIds.has(item.movie.id)) &&
+            item.movie.status === "PUBLISHED" &&
+            isCurrentlyAvailable(item.movie) &&
+            movieHasReadyAsset(item.movie)
+          )
+            return [toMovieCard(item.movie)];
+          if (item.series && item.series.status === "PUBLISHED") return [toSeriesCard(item.series)];
+          return [];
+        }),
+      }))
+      .filter((rail) => rail.items.length > 0);
+    const collectionMovieIds = new Set(
+      collectionRails.flatMap((rail) => rail.items.filter((item) => item.kind === "MOVIE").map((item) => item.id)),
+    );
+    const movieItems = movies
+      .filter((movie) => isCurrentlyAvailable(movie) && movieHasReadyAsset(movie) && !collectionMovieIds.has(movie.id))
+      .map(toMovieCard);
+    return {
+      defaultCollectionId,
+      rails: [
+        ...collectionRails,
+        ...(movieItems.length
+          ? [
+              {
+                id: "default-videos",
+                name: "Videos",
+                slug: "videos",
+                parentId: null,
+                parentName: null,
+                items: movieItems,
+              },
+            ]
+          : []),
+      ],
+    };
+  },
+);
+app.get(
+  "/api/v1/search",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "Search catalog", security: bearerSecurity } },
+  async (req) => {
+    const auth = (req as AuthRequest).auth;
+    const scope = await userAccessScope(auth.sub);
+    const q = z.object({ q: z.string().min(2).max(100), genre: z.string().optional() }).parse(req.query);
+    const [movies, collections] = await Promise.all([
+      prisma.movie.findMany({
+        where: {
+          status: "PUBLISHED",
+          deletedAt: null,
+          ...(scope ? { id: { in: [...scope.movieIds] } } : {}),
+          genres: q.genre ? { has: q.genre } : undefined,
+          OR: [
+            { title: { contains: q.q, mode: "insensitive" } },
+            { synopsis: { contains: q.q, mode: "insensitive" } },
+            { tags: { has: q.q } },
+          ],
+        },
+        include: { assets: true },
+        take: 30,
+      }),
+      prisma.collection.findMany({
+        where: {
+          published: true,
+          ...(scope ? { id: { in: [...scope.collectionIds] } } : {}),
+          OR: [{ name: { contains: q.q, mode: "insensitive" } }, { slug: { contains: q.q, mode: "insensitive" } }],
+        },
+        include: { items: { include: { movie: { include: { assets: true } } } } },
+        take: 10,
+      }),
+    ]);
+    const folderMovies = collections.flatMap((collection) =>
+      collection.items.flatMap((item) => (item.movie && !item.movie.deletedAt ? [item.movie] : [])),
+    );
+    const allMovies = [...movies, ...folderMovies].filter(
+      (movie, index, self) => self.findIndex((item) => item.id === movie.id) === index,
+    );
+    await ensureMovieDurations(allMovies as MovieWithAssets[]);
+    return allMovies
+      .filter(
+        (movie) =>
+          (!scope || scope.movieIds.has(movie.id)) &&
+          movie.status === "PUBLISHED" &&
+          !movie.deletedAt &&
+          isCurrentlyAvailable(movie) &&
+          movieHasReadyAsset(movie),
+      )
+      .map(toMovieCard);
+  },
+);
 app.post(
   "/api/v1/offline/downloads",
-  { preHandler: authenticate, config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+  {
+    preHandler: authenticate,
+    config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    schema: { tags: ["playback"], summary: "Create offline download grant", security: bearerSecurity },
+  },
   async (req, reply) => {
     const auth = (req as AuthRequest).auth;
     const body = z.object({ videoId: z.string().uuid(), deviceId: z.string().min(8) }).parse(req.body);
@@ -3274,7 +3397,11 @@ app.post(
 );
 app.post(
   "/api/v1/playback/sessions",
-  { preHandler: authenticate, config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+  {
+    preHandler: authenticate,
+    config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+    schema: { tags: ["playback"], summary: "Create playback session", security: bearerSecurity },
+  },
   async (req, reply) => {
     const auth = (req as AuthRequest).auth;
     const body = z
@@ -3334,44 +3461,60 @@ app.post(
     };
   },
 );
-app.post("/api/v1/playback/progress", { preHandler: authenticate }, async (req, reply) => {
-  const auth = (req as AuthRequest).auth;
-  const body = z
-    .object({
-      videoAssetId: z.string().uuid(),
-      positionSeconds: z.number().int().min(0),
-      completed: z.boolean().default(false),
-    })
-    .parse(req.body);
-  const asset = await prisma.videoAsset.findFirst({
-    where: { OR: [{ id: body.videoAssetId }, { movieId: body.videoAssetId }, { episodeId: body.videoAssetId }] },
-  });
-  if (!asset) return sendError(reply, req.id, 404, "VIDEO_UNAVAILABLE", "Video is unavailable");
-  return prisma.watchProgress.upsert({
-    where: { userId_videoAssetId: { userId: auth.sub, videoAssetId: asset.id } },
-    create: {
-      userId: auth.sub,
-      videoAssetId: asset.id,
-      positionSeconds: body.positionSeconds,
-      completed: body.completed,
-    },
-    update: { positionSeconds: body.positionSeconds, completed: body.completed, version: { increment: 1 } },
-  });
-});
-app.get("/api/v1/playback/progress", { preHandler: authenticate }, async (req) =>
-  prisma.watchProgress.findMany({
-    where: { userId: (req as AuthRequest).auth.sub },
-    orderBy: { updatedAt: "desc" },
-    take: 100,
-  }),
+app.post(
+  "/api/v1/playback/progress",
+  {
+    preHandler: authenticate,
+    schema: { tags: ["playback"], summary: "Save playback progress", security: bearerSecurity },
+  },
+  async (req, reply) => {
+    const auth = (req as AuthRequest).auth;
+    const body = z
+      .object({
+        videoAssetId: z.string().uuid(),
+        positionSeconds: z.number().int().min(0),
+        completed: z.boolean().default(false),
+      })
+      .parse(req.body);
+    const asset = await prisma.videoAsset.findFirst({
+      where: { OR: [{ id: body.videoAssetId }, { movieId: body.videoAssetId }, { episodeId: body.videoAssetId }] },
+    });
+    if (!asset) return sendError(reply, req.id, 404, "VIDEO_UNAVAILABLE", "Video is unavailable");
+    return prisma.watchProgress.upsert({
+      where: { userId_videoAssetId: { userId: auth.sub, videoAssetId: asset.id } },
+      create: {
+        userId: auth.sub,
+        videoAssetId: asset.id,
+        positionSeconds: body.positionSeconds,
+        completed: body.completed,
+      },
+      update: { positionSeconds: body.positionSeconds, completed: body.completed, version: { increment: 1 } },
+    });
+  },
 );
-app.get("/api/v1/history", { preHandler: authenticate }, async (req) =>
-  prisma.watchHistory.findMany({
-    where: { userId: (req as AuthRequest).auth.sub, removedAt: null },
-    include: { videoAsset: { include: { movie: true, episode: true } } },
-    orderBy: { watchedAt: "desc" },
-    take: 100,
-  }),
+app.get(
+  "/api/v1/playback/progress",
+  {
+    preHandler: authenticate,
+    schema: { tags: ["playback"], summary: "List playback progress", security: bearerSecurity },
+  },
+  async (req) =>
+    prisma.watchProgress.findMany({
+      where: { userId: (req as AuthRequest).auth.sub },
+      orderBy: { updatedAt: "desc" },
+      take: 100,
+    }),
+);
+app.get(
+  "/api/v1/history",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "List watch history", security: bearerSecurity } },
+  async (req) =>
+    prisma.watchHistory.findMany({
+      where: { userId: (req as AuthRequest).auth.sub, removedAt: null },
+      include: { videoAsset: { include: { movie: true, episode: true } } },
+      orderBy: { watchedAt: "desc" },
+      take: 100,
+    }),
 );
 app.delete("/api/v1/history/:id", { preHandler: authenticate }, async (req, reply) => {
   const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
@@ -3381,133 +3524,155 @@ app.delete("/api/v1/history/:id", { preHandler: authenticate }, async (req, repl
   });
   return reply.code(204).send();
 });
-app.post("/api/v1/my-list", { preHandler: authenticate }, async (req, reply) => {
-  const body = z.object({ catalogId: z.string().uuid(), kind: z.enum(["MOVIE", "SERIES"]) }).parse(req.body);
-  const userId = (req as AuthRequest).auth.sub;
-  const item = await prisma.myListItem.upsert({
-    where: { userId_catalogId: { userId, catalogId: body.catalogId } },
-    create: { userId, ...body },
-    update: { kind: body.kind },
-  });
-  return reply.code(201).send(item);
-});
-app.get("/api/v1/my-list", { preHandler: authenticate }, async (req) =>
-  prisma.myListItem.findMany({ where: { userId: (req as AuthRequest).auth.sub }, orderBy: { createdAt: "desc" } }),
+app.post(
+  "/api/v1/my-list",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "Add item to my list", security: bearerSecurity } },
+  async (req, reply) => {
+    const body = z.object({ catalogId: z.string().uuid(), kind: z.enum(["MOVIE", "SERIES"]) }).parse(req.body);
+    const userId = (req as AuthRequest).auth.sub;
+    const item = await prisma.myListItem.upsert({
+      where: { userId_catalogId: { userId, catalogId: body.catalogId } },
+      create: { userId, ...body },
+      update: { kind: body.kind },
+    });
+    return reply.code(201).send(item);
+  },
+);
+app.get(
+  "/api/v1/my-list",
+  { preHandler: authenticate, schema: { tags: ["viewer"], summary: "List my list items", security: bearerSecurity } },
+  async (req) =>
+    prisma.myListItem.findMany({ where: { userId: (req as AuthRequest).auth.sub }, orderBy: { createdAt: "desc" } }),
 );
 app.delete("/api/v1/my-list/:catalogId", { preHandler: authenticate }, async (req, reply) => {
   const catalogId = z.object({ catalogId: z.string().uuid() }).parse(req.params).catalogId;
   await prisma.myListItem.deleteMany({ where: { userId: (req as AuthRequest).auth.sub, catalogId } });
   return reply.code(204).send();
 });
-app.get("/api/v1/media/:id/manifest", async (req, reply) => {
-  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
-  const query = z.object({ pt: z.string().min(20).optional() }).parse(req.query);
-  if (query.pt) {
+app.get(
+  "/api/v1/media/:id/manifest",
+  {
+    schema: {
+      tags: ["media"],
+      summary: "Stream protected manifest or media file",
+      description: "Accepts either a bearer token or a short-lived playback query token named pt.",
+    },
+  },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const query = z.object({ pt: z.string().min(20).optional() }).parse(req.query);
+    if (query.pt) {
+      try {
+        const payload = await verifyPlayback(query.pt);
+        if (payload.videoId !== id || payload.scope !== "playback")
+          return sendError(reply, req.id, 403, "FORBIDDEN", "Playback token is not valid for this video");
+        await requireActiveSubject(payload.sub, req, reply);
+        if (reply.sent) return;
+      } catch {
+        return sendError(reply, req.id, 401, "TOKEN_INVALID", "Playback session expired");
+      }
+    } else {
+      await authenticate(req, reply);
+      if (reply.sent) return;
+    }
+    const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
+    if (!asset?.manifestStorageKey)
+      return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest is unavailable");
+    if (
+      asset.movie &&
+      (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+    )
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+    if (asset.episode && asset.episode.status !== "PUBLISHED")
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+    const filePath = storagePathFor(asset.manifestStorageKey);
+    if (!filePath) return sendError(reply, req.id, 400, "MANIFEST_INVALID", "Manifest path is invalid");
+    let size = 0;
     try {
-      const payload = await verifyPlayback(query.pt);
-      if (payload.videoId !== id || payload.scope !== "playback")
-        return sendError(reply, req.id, 403, "FORBIDDEN", "Playback token is not valid for this video");
+      size = (await stat(filePath)).size;
+    } catch {
+      return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest file is unavailable");
+    }
+    const range = req.headers.range;
+    reply.header("accept-ranges", "bytes");
+    reply.header("cache-control", "private, max-age=60");
+    reply.header("content-type", contentTypeFor(asset.manifestStorageKey));
+    if (range) {
+      const match = range.match(/bytes=(\d*)-(\d*)/);
+      const startRaw = match?.[1],
+        endRaw = match?.[2];
+      const start = startRaw ? Number(startRaw) : 0;
+      const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
+        return reply.code(416).header("content-range", `bytes */${size}`).send();
+      reply
+        .code(206)
+        .header("content-range", `bytes ${start}-${end}/${size}`)
+        .header("content-length", String(end - start + 1));
+      return reply.send(createReadStream(filePath, { start, end }));
+    }
+    reply.header("content-length", String(size));
+    return reply.send(createReadStream(filePath));
+  },
+);
+app.get(
+  "/api/v1/media/:id/download",
+  { schema: { tags: ["media"], summary: "Download offline media file" } },
+  async (req, reply) => {
+    const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
+    const query = z.object({ dt: z.string().min(20) }).parse(req.query);
+    try {
+      const payload = await verifyPlayback(query.dt);
+      if (payload.videoId !== id || payload.scope !== "offline-download")
+        return sendError(reply, req.id, 403, "FORBIDDEN", "Download token is not valid for this video");
       await requireActiveSubject(payload.sub, req, reply);
       if (reply.sent) return;
     } catch {
-      return sendError(reply, req.id, 401, "TOKEN_INVALID", "Playback session expired");
+      return sendError(reply, req.id, 401, "TOKEN_INVALID", "Offline download link expired");
     }
-  } else {
-    await authenticate(req, reply);
-    if (reply.sent) return;
-  }
-  const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
-  if (!asset?.manifestStorageKey) return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest is unavailable");
-  if (
-    asset.movie &&
-    (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
-  )
-    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
-  if (asset.episode && asset.episode.status !== "PUBLISHED")
-    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
-  const filePath = storagePathFor(asset.manifestStorageKey);
-  if (!filePath) return sendError(reply, req.id, 400, "MANIFEST_INVALID", "Manifest path is invalid");
-  let size = 0;
-  try {
-    size = (await stat(filePath)).size;
-  } catch {
-    return sendError(reply, req.id, 404, "MANIFEST_NOT_FOUND", "Manifest file is unavailable");
-  }
-  const range = req.headers.range;
-  reply.header("accept-ranges", "bytes");
-  reply.header("cache-control", "private, max-age=60");
-  reply.header("content-type", contentTypeFor(asset.manifestStorageKey));
-  if (range) {
-    const match = range.match(/bytes=(\d*)-(\d*)/);
-    const startRaw = match?.[1],
-      endRaw = match?.[2];
-    const start = startRaw ? Number(startRaw) : 0;
-    const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
-      return reply.code(416).header("content-range", `bytes */${size}`).send();
-    reply
-      .code(206)
-      .header("content-range", `bytes ${start}-${end}/${size}`)
-      .header("content-length", String(end - start + 1));
-    return reply.send(createReadStream(filePath, { start, end }));
-  }
-  reply.header("content-length", String(size));
-  return reply.send(createReadStream(filePath));
-});
-app.get("/api/v1/media/:id/download", async (req, reply) => {
-  const id = z.object({ id: z.string().uuid() }).parse(req.params).id;
-  const query = z.object({ dt: z.string().min(20) }).parse(req.query);
-  try {
-    const payload = await verifyPlayback(query.dt);
-    if (payload.videoId !== id || payload.scope !== "offline-download")
-      return sendError(reply, req.id, 403, "FORBIDDEN", "Download token is not valid for this video");
-    await requireActiveSubject(payload.sub, req, reply);
-    if (reply.sent) return;
-  } catch {
-    return sendError(reply, req.id, 401, "TOKEN_INVALID", "Offline download link expired");
-  }
-  const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
-  const key = asset?.manifestStorageKey;
-  if (!asset || !key) return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
-  if (
-    asset.movie &&
-    (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
-  )
-    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
-  if (asset.episode && asset.episode.status !== "PUBLISHED")
-    return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
-  const filePath = storagePathFor(key);
-  if (!filePath) return sendError(reply, req.id, 400, "DOWNLOAD_INVALID", "Download path is invalid");
-  let size = 0;
-  try {
-    size = (await stat(filePath)).size;
-  } catch {
-    return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
-  }
-  const range = req.headers.range;
-  const extension = path.extname(key) || ".mp4";
-  const filename = `${slugify(asset.movie?.title ?? asset.episode?.title ?? "securestream-video")}${extension}`;
-  reply.header("accept-ranges", "bytes");
-  reply.header("cache-control", "private, no-store");
-  reply.header("content-disposition", `inline; filename="${filename}"`);
-  reply.header("content-type", contentTypeFor(key));
-  if (range) {
-    const match = range.match(/bytes=(\d*)-(\d*)/);
-    const startRaw = match?.[1],
-      endRaw = match?.[2];
-    const start = startRaw ? Number(startRaw) : 0;
-    const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
-      return reply.code(416).header("content-range", `bytes */${size}`).send();
-    reply
-      .code(206)
-      .header("content-range", `bytes ${start}-${end}/${size}`)
-      .header("content-length", String(end - start + 1));
-    return reply.send(createReadStream(filePath, { start, end }));
-  }
-  reply.header("content-length", String(size));
-  return reply.send(createReadStream(filePath));
-});
+    const asset = await prisma.videoAsset.findUnique({ where: { id }, include: { movie: true, episode: true } });
+    const key = asset?.manifestStorageKey;
+    if (!asset || !key) return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
+    if (
+      asset.movie &&
+      (asset.movie.status !== "PUBLISHED" || asset.movie.deletedAt || !isCurrentlyAvailable(asset.movie))
+    )
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This title is unavailable");
+    if (asset.episode && asset.episode.status !== "PUBLISHED")
+      return sendError(reply, req.id, 403, "TITLE_UNAVAILABLE", "This episode is unavailable");
+    const filePath = storagePathFor(key);
+    if (!filePath) return sendError(reply, req.id, 400, "DOWNLOAD_INVALID", "Download path is invalid");
+    let size = 0;
+    try {
+      size = (await stat(filePath)).size;
+    } catch {
+      return sendError(reply, req.id, 404, "DOWNLOAD_NOT_FOUND", "Offline file is unavailable");
+    }
+    const range = req.headers.range;
+    const extension = path.extname(key) || ".mp4";
+    const filename = `${slugify(asset.movie?.title ?? asset.episode?.title ?? "securestream-video")}${extension}`;
+    reply.header("accept-ranges", "bytes");
+    reply.header("cache-control", "private, no-store");
+    reply.header("content-disposition", `inline; filename="${filename}"`);
+    reply.header("content-type", contentTypeFor(key));
+    if (range) {
+      const match = range.match(/bytes=(\d*)-(\d*)/);
+      const startRaw = match?.[1],
+        endRaw = match?.[2];
+      const start = startRaw ? Number(startRaw) : 0;
+      const end = endRaw ? Math.min(Number(endRaw), size - 1) : size - 1;
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size)
+        return reply.code(416).header("content-range", `bytes */${size}`).send();
+      reply
+        .code(206)
+        .header("content-range", `bytes ${start}-${end}/${size}`)
+        .header("content-length", String(end - start + 1));
+      return reply.send(createReadStream(filePath, { start, end }));
+    }
+    reply.header("content-length", String(size));
+    return reply.send(createReadStream(filePath));
+  },
+);
 
 setInterval(
   () => void runScheduledBackupIfDue().catch((error) => app.log.error({ err: error }, "scheduled backup failed")),
